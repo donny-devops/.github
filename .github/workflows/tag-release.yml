@@ -1,0 +1,22 @@
+name: Tag Release
+
+# Simple semver tag-based release: push a tag like v1.2.3 to create a GitHub Release.
+# Alternative to release-please when you prefer explicit version tags.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
