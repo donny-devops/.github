@@ -1,0 +1,81 @@
+name: Security Scan
+
+# Reusable workflow: Secrets scanning & dependency supply-chain security
+# Call it from any donny-devops repository:
+#
+# jobs:
+#   security:
+#     uses: donny-devops/.github/.github/workflows/security-scan.yml@main
+#     with:
+#       enable-gitleaks: true
+#       enable-trufflehog: true
+
+on:
+  workflow_call:
+    inputs:
+      enable-gitleaks:
+        description: 'Run Gitleaks commit history scan'
+        type: boolean
+        default: true
+      enable-trufflehog:
+        description: 'Run TruffleHog verified credentials scan'
+        type: boolean
+        default: true
+      enable-dependency-review:
+        description: 'Run GitHub Dependency Review on Pull Requests'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+jobs:
+  gitleaks:
+    name: Gitleaks Scan
+    if: inputs.enable-gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: detect --source . --verbose --redact
+
+  trufflehog:
+    name: TruffleHog Scan
+    if: inputs.enable-trufflehog
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+  dependency-review:
+    name: Dependency Review
+    if: inputs.enable-dependency-review && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

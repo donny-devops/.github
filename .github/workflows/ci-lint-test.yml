@@ -1,0 +1,102 @@
+name: CI Lint & Test
+
+# Reusable workflow: Unified linting, formatting, and unit testing
+# Call it from any donny-devops repository:
+#
+# jobs:
+#   ci:
+#     uses: donny-devops/.github/.github/workflows/ci-lint-test.yml@main
+#     with:
+#       language: 'node'
+#       test-command: 'npm test'
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: 'Target runtime ecosystem (node, python, go)'
+        type: string
+        default: 'node'
+      node-version:
+        description: 'Node.js version'
+        type: string
+        default: '20'
+      python-version:
+        description: 'Python version'
+        type: string
+        default: '3.12'
+      go-version:
+        description: 'Go version'
+        type: string
+        default: '1.22'
+      install-command:
+        description: 'Custom dependency installation command'
+        type: string
+        default: ''
+      lint-command:
+        description: 'Lint command to execute (e.g. npm run lint, ruff check .)'
+        type: string
+        default: ''
+      test-command:
+        description: 'Test command to execute (e.g. npm test, pytest)'
+        type: string
+        default: ''
+      build-command:
+        description: 'Build command to execute (e.g. npm run build)'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Setup Python
+        if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Setup Go
+        if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ inputs.go-version }}
+
+      - name: Install dependencies
+        run: |
+          if [ -n "${{ inputs.install-command }}" ]; then
+            ${{ inputs.install-command }}
+          elif [ "${{ inputs.language }}" = "node" ]; then
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          elif [ "${{ inputs.language }}" = "python" ]; then
+            pip install --upgrade pip
+            if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+            if [ -f pyproject.toml ]; then pip install .; fi
+          elif [ "${{ inputs.language }}" = "go" ]; then
+            go mod download
+          fi
+
+      - name: Run Linter
+        if: inputs.lint-command != ''
+        run: ${{ inputs.lint-command }}
+
+      - name: Run Build
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}
+
+      - name: Run Tests
+        if: inputs.test-command != ''
+        run: ${{ inputs.test-command }}

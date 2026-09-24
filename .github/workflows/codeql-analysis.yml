@@ -1,0 +1,54 @@
+name: CodeQL Analysis
+
+# Reusable workflow: CodeQL Static Application Security Testing (SAST)
+# Call it from any donny-devops repository:
+#
+# jobs:
+#   analyze:
+#     uses: donny-devops/.github/.github/workflows/codeql-analysis.yml@main
+#     with:
+#       languages: '["javascript-typescript", "python"]'
+
+on:
+  workflow_call:
+    inputs:
+      languages:
+        description: 'JSON array of languages to analyze (e.g. ["javascript-typescript"], ["python"], ["go"])'
+        type: string
+        default: '["javascript-typescript"]'
+      queries:
+        description: 'CodeQL query suite (default: security-extended)'
+        type: string
+        default: 'security-extended'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJson(inputs.languages) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: ${{ inputs.queries }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
