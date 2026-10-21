@@ -1,0 +1,21 @@
+{
+  "title": "PipeFish lead to Slack",
+  "steps": [
+    {
+      "app": "Webhooks by Zapier",
+      "event": "Catch Hook",
+      "note": "Point OpenClaw / Moltgate / site forms here."
+    },
+    {
+      "app": "Filter",
+      "event": "Only continue if",
+      "condition": "request length >= 12"
+    },
+    {
+      "app": "Slack",
+      "event": "Send Channel Message",
+      "channel": "#leads",
+      "text": "New PipeFish lead: {{sku_id}} — {{request}}"
+    }
+  ]
+}

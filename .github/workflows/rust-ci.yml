@@ -1,0 +1,50 @@
+name: Rust CI
+
+# Reusable workflow for pipefish-recon and other Rust crates.
+#
+# jobs:
+#   rust:
+#     uses: donny-devops/.github/.github/workflows/rust-ci.yml@main
+#     with:
+#       working-directory: kernel
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        type: string
+        default: "."
+      rust-version:
+        type: string
+        default: "stable"
+      features:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Cargo test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version }}
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: |
+          if [ -n "${{ inputs.features }}" ]; then
+            cargo test --features "${{ inputs.features }}"
+          else
+            cargo test
+          fi

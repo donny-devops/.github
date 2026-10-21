@@ -1,0 +1,40 @@
+name: IaC Plan
+
+# Reusable Terraform fmt + validate. Does not apply and does not need cloud creds.
+#
+# jobs:
+#   iac:
+#     uses: donny-devops/.github/.github/workflows/iac-plan.yml@main
+#     with:
+#       working-directory: automation/terraform/modules/secret-store
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Terraform root module path"
+        type: string
+        default: "automation/terraform/modules/secret-store"
+      terraform-version:
+        type: string
+        default: "1.9.8"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate

@@ -1,0 +1,17 @@
+{
+  "name": "@donny-devops/pipefish-mesh-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript MCP server for the PipeFish agentic mesh control plane.",
+  "bin": {
+    "pipefish-mesh-mcp": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "test": "node --experimental-strip-types --test src/index.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

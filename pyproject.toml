@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipefish-mesh"
+version = "0.1.0"
+description = "PipeFish control-plane: A2A envelopes, async DAG engine, commerce ledger, and MCP tools."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Adonis Jimenez", email = "adonis-jimenez@outlook.com" }]
+keywords = ["agentic-mesh", "a2a", "dag", "mcp", "revops", "gitops"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+db = ["sqlalchemy>=2.0"]
+
+[project.scripts]
+pipefish-mesh = "pipefish_mesh.cli:main"
+pipefish-mcp = "pipefish_mesh.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

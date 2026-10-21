@@ -1,0 +1,43 @@
+---
+- name: Bootstrap PipeFish mesh control plane
+  hosts: mesh
+  become: true
+  vars:
+    pipefish_root: /opt/pipefish-mesh
+    pipefish_user: pipefish
+  tasks:
+    - name: Install runtime packages
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+          - golang-go
+          - nodejs
+          - npm
+        update_cache: true
+        state: present
+
+    - name: Create service user
+      ansible.builtin.user:
+        name: "{{ pipefish_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+
+    - name: Sync control-plane tree
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../../"
+        dest: "{{ pipefish_root }}/"
+        owner: "{{ pipefish_user }}"
+        mode: "0755"
+
+    - name: Install Python package
+      ansible.builtin.pip:
+        name: "{{ pipefish_root }}"
+        extra_args: --no-cache-dir
+        virtualenv: "{{ pipefish_root }}/.venv"
+        virtualenv_command: python3 -m venv
+
+    - name: Remind operator about secrets
+      ansible.builtin.debug:
+        msg: "Set PIPEFISH_SECRET_FILE or SSM parameters. Do not put secrets in this playbook."

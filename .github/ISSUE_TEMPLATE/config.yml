@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Book a paid engagement
+    url: mailto:adonis-jimenez@outlook.com?subject=PipeFish%20engagement
+    about: Discovery, security review, retainer, or PQC project
+  - name: PipeFish Labs site
+    url: https://pipefishlabs.io
+    about: Public portfolio and contact
