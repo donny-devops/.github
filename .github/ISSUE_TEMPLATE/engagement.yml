@@ -1,0 +1,40 @@
+name: Paid engagement
+description: Book a PipeFish discovery, security review, retainer, or PQC project
+title: "[Engage]: "
+labels: [engagement, revenue]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This form is for paid work. Pings under $25 belong on the
+        [OpenClaw revenue engine](https://github.com/donny-devops/openclaw-revenue-engine) inbox.
+  - type: dropdown
+    id: sku
+    attributes:
+      label: SKU
+      options:
+        - mesh.consult.discovery ($2,500)
+        - mesh.audit.security ($4,500)
+        - mesh.retain.ops ($8,000 / month)
+        - mesh.pqc.migration ($12,000)
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What should be true after this engagement?
+    validations:
+      required: true
+  - type: input
+    id: company
+    attributes:
+      label: Company
+  - type: input
+    id: contact
+    attributes:
+      label: Contact email
+      placeholder: you@company.com
+    validations:
+      required: true

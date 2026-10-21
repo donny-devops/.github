@@ -14,7 +14,7 @@ on:
   workflow_call:
     inputs:
       language:
-        description: 'Target runtime ecosystem (node, python, go)'
+        description: 'Target runtime ecosystem (node, python, go, rust)'
         type: string
         default: 'node'
       node-version:
@@ -29,6 +29,10 @@ on:
         description: 'Go version'
         type: string
         default: '1.22'
+      rust-version:
+        description: 'Rust toolchain'
+        type: string
+        default: 'stable'
       install-command:
         description: 'Custom dependency installation command'
         type: string
@@ -75,6 +79,12 @@ jobs:
         with:
           go-version: ${{ inputs.go-version }}
 
+      - name: Setup Rust
+        if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version }}
+
       - name: Install dependencies
         run: |
           if [ -n "${{ inputs.install-command }}" ]; then
@@ -87,6 +97,8 @@ jobs:
             if [ -f pyproject.toml ]; then pip install .; fi
           elif [ "${{ inputs.language }}" = "go" ]; then
             go mod download
+          elif [ "${{ inputs.language }}" = "rust" ]; then
+            cargo fetch
           fi
 
       - name: Run Linter

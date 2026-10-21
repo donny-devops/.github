@@ -1,0 +1,9 @@
+name = "pipefish-mesh-edge"
+compatibility_date = "2026-10-01"
+pages_build_output_dir = "public"
+
+[vars]
+PIPEFISH_ENV = "dev"
+
+# Tunnel token and account IDs belong in the secret broker, not this file.
+# wrangler secret put TUNNEL_TOKEN

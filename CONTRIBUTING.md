@@ -16,6 +16,23 @@ Thank you for contributing! This guide applies to all `donny-devops` repositorie
 - `chore/<name>` — maintenance, CI, dependencies
 - `security/<name>` — security-sensitive changes
 
+## This repository
+
+`donny-devops/.github` is the private control plane. Python lives in
+`src/pipefish_mesh`, the Go gateway in `services/mesh-gateway`, and the
+TypeScript MCP server in `mcp/pipefish-mesh`.
+
+```bash
+python -m pip install -e ".[dev]"
+ruff check src tests
+pytest
+(cd services/mesh-gateway && go test ./...)
+(cd mcp/pipefish-mesh && npm test)
+```
+
+Do not add profile links to repositories that are missing from `catalog/repos.yaml`.
+Do not commit secrets — use `.env.example` and the secret broker.
+
 ## Before you open a PR
 
 - Run the repo's linters and tests locally.

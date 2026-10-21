@@ -1,0 +1,53 @@
+{
+  "currency": "USD",
+  "processor": "Stripe via Moltgate / OpenClaw Revenue Engine",
+  "contact": "adonis-jimenez@outlook.com",
+  "site": "https://pipefishlabs.io",
+  "skus": [
+    {
+      "id": "mesh.lane.ping",
+      "name": "Paid agent ping",
+      "price_usd": 25,
+      "cadence": "one_time",
+      "lane": "ping",
+      "description": "Short paid inbox ping through OpenClaw + Moltgate. Spam is free; attention is not.",
+      "repo": "https://github.com/donny-devops/openclaw-revenue-engine"
+    },
+    {
+      "id": "mesh.consult.discovery",
+      "name": "Agentic mesh discovery",
+      "price_usd": 2500,
+      "cadence": "one_time",
+      "lane": "standard",
+      "description": "Half-day architecture workshop: current repos, A2A contracts, DAG owners, and a 30-day revenue plan.",
+      "repo": "https://github.com/donny-devops/pipefish-labs"
+    },
+    {
+      "id": "mesh.audit.security",
+      "name": "Agent / OpenClaw security review",
+      "price_usd": 4500,
+      "cadence": "one_time",
+      "lane": "priority",
+      "description": "Hardening audit for agent gateways, secret brokers, tool ACLs, and post-quantum readiness.",
+      "repo": "https://github.com/donny-devops/pipefish-recon"
+    },
+    {
+      "id": "mesh.retain.ops",
+      "name": "GitOps + AgentOps retainer",
+      "price_usd": 8000,
+      "cadence": "monthly",
+      "lane": "ultra",
+      "description": "Retained CI/CD, observability, LLMOps, and multi-agent operations for a production mesh.",
+      "repo": "https://github.com/donny-devops/five-agent-os"
+    },
+    {
+      "id": "mesh.pqc.migration",
+      "name": "Post-quantum migration studio",
+      "price_usd": 12000,
+      "cadence": "project",
+      "lane": "priority",
+      "description": "NIST FIPS 203/204/205 inventory, hybrid TLS plan, and crypto-agile rollout.",
+      "repo": "https://github.com/donny-devops/post-quantum-studio"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+name: Ansible Lint
+
+# Reusable ansible-lint for playbooks.
+#
+# jobs:
+#   ansible:
+#     uses: donny-devops/.github/.github/workflows/ansible-lint.yml@main
+#     with:
+#       path: automation/ansible
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        type: string
+        default: "automation/ansible"
+
+permissions:
+  contents: read
+
+jobs:
+  ansible-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ansible-lint
+        run: pip install ansible-lint
+      - name: Lint
+        run: ansible-lint "${{ inputs.path }}"

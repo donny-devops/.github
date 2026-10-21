@@ -1,0 +1,7 @@
+# Copy to tunnel.yml and load the token from the secret broker.
+tunnel: PIPEFISH_TUNNEL_ID
+credentials-file: /run/pipefish/tunnel.json
+ingress:
+  - hostname: mesh.example.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404

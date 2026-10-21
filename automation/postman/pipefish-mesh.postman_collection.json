@@ -1,0 +1,29 @@
+{
+  "info": {
+    "name": "PipeFish Mesh Gateway",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+    },
+    {
+      "name": "Catalog",
+      "request": { "method": "GET", "url": "{{baseUrl}}/v1/catalog" }
+    },
+    {
+      "name": "Publish envelope",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/v1/envelopes",
+        "body": {
+          "mode": "raw",
+          "raw": "{\"source\":\"intake\",\"target\":\"decision\",\"intent\":\"qualify\",\"payload\":{\"request\":\"Need an OpenClaw security review\"}}"
+        }
+      }
+    }
+  ],
+  "variable": [{ "key": "baseUrl", "value": "http://127.0.0.1:8787" }]
+}

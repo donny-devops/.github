@@ -1,0 +1,50 @@
+# Live donny-devops repositories. Profile and docs must not link 404s.
+owner: donny-devops
+site: https://pipefishlabs.io
+contact: adonis-jimenez@outlook.com
+repos:
+  - name: donny-devops
+    role: public GitHub profile
+    url: https://github.com/donny-devops/donny-devops
+  - name: pipefish-labs
+    role: public site + enterprise workflow engineering
+    url: https://github.com/donny-devops/pipefish-labs
+  - name: five-agent-os
+    role: autonomous multi-agent operating model
+    url: https://github.com/donny-devops/five-agent-os
+  - name: openclaw-revenue-engine
+    role: agent commerce, billing, Moltgate / Stripe rails
+    url: https://github.com/donny-devops/openclaw-revenue-engine
+  - name: pipefish-recon
+    role: Rust threat-intel kernel, MCP ACL, PQC-ready bus
+    url: https://github.com/donny-devops/pipefish-recon
+  - name: post-quantum-studio
+    role: NIST FIPS 203/204/205 reference studio
+    url: https://github.com/donny-devops/post-quantum-studio
+  - name: terraform-aws-modules
+    role: AWS GitOps modules (VPC, ECS, RDS, IAM)
+    url: https://github.com/donny-devops/terraform-aws-modules
+  - name: github-actions-templates
+    role: reusable public CI/CD workflows
+    url: https://github.com/donny-devops/github-actions-templates
+  - name: infra-monitoring-dashboard
+    role: Grafana / Prometheus / Alertmanager operational intelligence
+    url: https://github.com/donny-devops/infra-monitoring-dashboard
+  - name: docker-hacking-lab
+    role: isolated ethical-hacking lab
+    url: https://github.com/donny-devops/docker-hacking-lab
+  - name: qwen-core
+    role: TypeScript focus / productivity client
+    url: https://github.com/donny-devops/qwen-core
+  - name: api-saas-decision-engine
+    role: decision / scoring API (bootstrap in progress)
+    url: https://github.com/donny-devops/api-saas-decision-engine
+  - name: .github
+    role: private control plane, community health, reusable workflows
+    url: https://github.com/donny-devops/.github
+    visibility: private
+do_not_link:
+  - pqc-sdk
+  - jenkins-pipeline-library
+  - fastapi-starter-kit
+  - cloudflare-workers-templates

@@ -1,0 +1,42 @@
+name: Newman API Tests
+
+# Reusable Postman/Newman runner.
+#
+# jobs:
+#   api:
+#     uses: donny-devops/.github/.github/workflows/newman.yml@main
+#     with:
+#       collection: automation/postman/pipefish-mesh.postman_collection.json
+
+on:
+  workflow_call:
+    inputs:
+      collection:
+        type: string
+        required: true
+      environment:
+        type: string
+        default: ""
+      extra-args:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  newman:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run Newman
+        run: |
+          npm install -g newman
+          ARGS="${{ inputs.collection }}"
+          if [ -n "${{ inputs.environment }}" ]; then
+            ARGS="$ARGS -e ${{ inputs.environment }}"
+          fi
+          newman run $ARGS ${{ inputs.extra-args }}

@@ -1,0 +1,26 @@
+{
+  "name": "PipeFish RevOps sync",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "mapper": { "path": "pipefish-revops" }
+    },
+    {
+      "id": 2,
+      "module": "util:SetVariable",
+      "mapper": {
+        "sku_id": "{{1.sku_id}}",
+        "amount_usd": "{{1.amount_usd}}"
+      }
+    },
+    {
+      "id": 3,
+      "module": "slack:CreateMessage",
+      "mapper": {
+        "channel": "revops",
+        "text": "Recognized {{2.sku_id}} for ${{2.amount_usd}}"
+      }
+    }
+  ]
+}
