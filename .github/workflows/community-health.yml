@@ -47,6 +47,8 @@ jobs:
           require .github/ISSUE_TEMPLATE/bug_report.yml
           require .github/ISSUE_TEMPLATE/feature_request.yml
           require .github/ISSUE_TEMPLATE/question.md
+          # Markdown fallback so community-profile checks detect templates;
+          # YAML forms remain the primary "New issue" chooser.
           require .github/dependabot.yml
 
           if [ "$missing" -ne 0 ]; then
