@@ -1,0 +1,59 @@
+name: Community Health
+
+on:
+  workflow_call:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  community-standards:
+    name: Community standards checklist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify recommended community files
+        run: |
+          set -euo pipefail
+          missing=0
+          require() {
+            if [ ! -e "$1" ]; then
+              echo "::error file=$1::Missing required community file: $1"
+              missing=1
+            else
+              echo "OK  $1"
+            fi
+          }
+
+          require README.md
+          require LICENSE
+          require CODE_OF_CONDUCT.md
+          require CONTRIBUTING.md
+          require SECURITY.md
+          require SUPPORT.md
+          require GOVERNANCE.md
+          require .github/FUNDING.yml
+          require .github/CODEOWNERS
+          require .github/PULL_REQUEST_TEMPLATE.md
+          require .github/ISSUE_TEMPLATE.md
+          require .github/ISSUE_TEMPLATE/config.yml
+          require .github/ISSUE_TEMPLATE/bug_report.yml
+          require .github/ISSUE_TEMPLATE/feature_request.yml
+          require .github/ISSUE_TEMPLATE/question.md
+          # Markdown fallback so community-profile checks detect templates;
+          # YAML forms remain the primary "New issue" chooser.
+          require .github/dependabot.yml
+
+          if [ "$missing" -ne 0 ]; then
+            echo "Community standards checklist failed."
+            exit 1
+          fi
+
+          echo "Community standards checklist passed (A / A+ file set)."

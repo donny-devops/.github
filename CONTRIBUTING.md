@@ -8,6 +8,9 @@ Thank you for contributing! This guide applies to all `donny-devops` repositorie
 2. Create a branch from `main`: `git checkout -b feat/your-change`.
 3. Make your changes with clear, focused commits.
 
+Use the structured issue forms (bug, feature, or question) when reporting
+work. Security reports must follow [`SECURITY.md`](SECURITY.md).
+
 ## Branch naming
 
 - `feat/<name>` — new features
