@@ -1,0 +1,13 @@
+# Default review owner for every path in this repository.
+* @donny-devops
+
+# Community health files and reusable workflows
+LICENSE @donny-devops
+README.md @donny-devops
+SECURITY.md @donny-devops
+SUPPORT.md @donny-devops
+GOVERNANCE.md @donny-devops
+CODE_OF_CONDUCT.md @donny-devops
+CONTRIBUTING.md @donny-devops
+.github/ @donny-devops
+.github/workflows/ @donny-devops

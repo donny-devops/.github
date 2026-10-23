@@ -16,6 +16,7 @@ All workflows are located in [`.github/workflows`](.github/workflows) and can be
 | **CI Lint & Test** | [`ci-lint-test.yml`](.github/workflows/ci-lint-test.yml) | Standardized linting, testing, and building for Node.js, Python, and Go | `workflow_call` |
 | **Semantic Release** | [`release-please.yml`](.github/workflows/release-please.yml) | Automated semver versioning, changelog generation, and releases | `workflow_call` |
 | **Tag Release** | [`tag-release.yml`](.github/workflows/tag-release.yml) | Creates GitHub releases when semantic version tags (`v*`) are pushed | `push` (tags: `v*`) |
+| **Community Health** | [`community-health.yml`](.github/workflows/community-health.yml) | Asserts the recommended GitHub community-standards file set is present | `workflow_call`, `push`, `pull_request` |
 
 ---
 
@@ -121,12 +122,26 @@ jobs:
 
 ## 📋 Default Community Health Files
 
-GitHub automatically applies these files across all repositories under `donny-devops` that do not define their own:
+GitHub applies these files to every **public** `donny-devops` repository that does not define its own copy. This repository itself must remain public — GitHub does not inherit defaults from a private `.github` repo.
 
-- **[Contributing Guide](CONTRIBUTING.md)**: Standard git branching model (`feat/`, `fix/`, `docs/`, `chore/`), PR checklist, and contribution guidelines.
-- **[Code of Conduct](CODE_OF_CONDUCT.md)**: Contributor Covenant v2.1.
-- **[Security Policy](SECURITY.md)**: Coordinated vulnerability disclosure protocol.
-- **[Issue Templates](.github/ISSUE_TEMPLATE/)**:
-  - `bug_report.yml`: Structured form for reporting bugs and reproduction steps.
-  - `feature_request.yml`: Structured form for proposing features.
-- **[Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md)**: Standard PR review checklist.
+This file set is the recommended [community standards](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/about-community-profiles-for-public-repositories) checklist (description, README, license, conduct, contributing, security policy, issue templates, pull request template). Repositories that inherit it score **100% / A** on GitHub community health.
+
+| File | Purpose |
+| :--- | :--- |
+| **[README.md](README.md)** | How to use the reusable workflows and default files |
+| **[LICENSE](LICENSE)** | MIT — reuse, modification, and distribution terms |
+| **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** | Contributor Covenant v2.1 |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | Branch naming (`feat/`, `fix/`, `docs/`, `chore/`), PR checklist |
+| **[SECURITY.md](SECURITY.md)** | Private vulnerability reporting (GitHub advisory + email) |
+| **[SUPPORT.md](SUPPORT.md)** | Where to file bugs, questions, and security reports |
+| **[GOVERNANCE.md](GOVERNANCE.md)** | Maintainer roles and how defaults are overridden |
+| **[FUNDING.yml](.github/FUNDING.yml)** | Sponsor / contact links |
+| **[CODEOWNERS](.github/CODEOWNERS)** | Default review owner `@donny-devops` |
+| **[Issue templates](.github/ISSUE_TEMPLATE/)** | YAML forms + markdown fallbacks for bug, feature, and question |
+| **[Pull request template](.github/PULL_REQUEST_TEMPLATE.md)** | Review checklist |
+
+### Notes for individual repositories
+
+- **License does not inherit.** Add a `LICENSE` file to any repository that is missing one (`api-saas-decision-engine`, `post-quantum-studio`, and any new public repo).
+- **Description, topics, and a root README** still need to live in each project. Defaults cannot supply those.
+- Repositories that already ship their own community files keep those copies. Remove a local file only when you want the default from this repo.
