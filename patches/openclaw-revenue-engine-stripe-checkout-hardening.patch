@@ -1,0 +1,2786 @@
+From c054751ad46b060fed6ac9cf1e94a9e10b2246ab Mon Sep 17 00:00:00 2001
+From: Adonis Jimenez <271941740+donny-devops@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 06:56:10 +0000
+Subject: [PATCH] feat(stripe): RAK-first Checkout, retainers, and billing mesh
+ controls
+
+Pin stripe@23 / 2026-09-30.endive, prefer restricted keys, omit
+payment_method_types, set integration_identifier, and fulfill from
+async-safe webhooks. Add a $8000/mo GitOps retainer subscription,
+Customer Portal, AES-256-GCM PII sealing, audit/metrics/readiness,
+intrusion windows, and an async DAG that emits PipeFish A2A envelopes.
+---
+ .env.example                                 |  20 +-
+ README.md                                    |  41 +-
+ config/lanes.json                            |  20 +
+ config/openclaw.json                         |   3 +-
+ config/services.json                         |  11 +
+ package-lock.json                            |  24 +-
+ package.json                                 |   2 +-
+ services/gitops-retainer.md                  |  22 ++
+ src/agents/orchestrator.ts                   |   1 +
+ src/billing/checkout.ts                      | 157 ++++++--
+ src/billing/ledger.ts                        |  31 +-
+ src/billing/stripeClient.ts                  | 101 +++--
+ src/billing/types.ts                         |   4 +
+ src/commerce/offers.ts                       |  32 ++
+ src/governance/auditLog.ts                   |  37 ++
+ src/index.ts                                 |  30 +-
+ src/mesh/envelope.ts                         |  81 ++++
+ src/observability/metrics.ts                 |  26 ++
+ src/observability/readiness.ts               |  41 ++
+ src/orchestration/billingDag.ts              |  68 ++++
+ src/orchestration/dag.ts                     | 124 +++++++
+ src/revenue/config.ts                        |   4 +
+ src/revenue/types.ts                         |   4 +
+ src/routes/revenue.ts                        |  45 ++-
+ src/security/crypto.ts                       |  69 ++++
+ src/security/intrusion.ts                    |  65 ++++
+ src/security/redact.ts                       |   1 +
+ src/webhooks/stripe.webhook.ts               | 370 +++++++++++++++----
+ tests/unit/collection.branches.test.ts       |   5 +
+ tests/unit/platform.controls.test.ts         | 142 +++++++
+ tests/unit/revenue.collection.routes.test.ts |  30 ++
+ tests/unit/revenue.routes.test.ts            |  14 +-
+ tests/unit/revenue.service.test.ts           |  23 +-
+ tests/unit/saraPlus.test.ts                  |   2 +-
+ tests/unit/stripe.checkout.test.ts           | 132 +++++++
+ tests/unit/stripe.keys.test.ts               |  59 +++
+ tests/unit/stripe.webhook.test.ts            | 156 ++++++++
+ tests/unit/webhook.fallbacks.test.ts         |  16 +-
+ 38 files changed, 1840 insertions(+), 173 deletions(-)
+ create mode 100644 services/gitops-retainer.md
+ create mode 100644 src/commerce/offers.ts
+ create mode 100644 src/governance/auditLog.ts
+ create mode 100644 src/mesh/envelope.ts
+ create mode 100644 src/observability/metrics.ts
+ create mode 100644 src/observability/readiness.ts
+ create mode 100644 src/orchestration/billingDag.ts
+ create mode 100644 src/orchestration/dag.ts
+ create mode 100644 src/security/crypto.ts
+ create mode 100644 src/security/intrusion.ts
+ create mode 100644 tests/unit/platform.controls.test.ts
+ create mode 100644 tests/unit/stripe.checkout.test.ts
+ create mode 100644 tests/unit/stripe.keys.test.ts
+
+diff --git a/.env.example b/.env.example
+index 1450cb8..614b95b 100644
+--- a/.env.example
++++ b/.env.example
+@@ -21,15 +21,31 @@ DB_POOL_MIN=2
+ DB_POOL_MAX=10
+ 
+ # Stripe Billing
+-STRIPE_SECRET_KEY=sk_test_your_stripe_secret_key_here
++# Prefer a restricted API key (RAK). Secret keys are a local/test fallback only.
++STRIPE_RESTRICTED_KEY=rk_test_your_restricted_key_here
++STRIPE_SECRET_KEY=sk_test_fallback_only_not_for_production
++STRIPE_ALLOW_SECRET_KEY=false
+ STRIPE_PUBLISHABLE_KEY=pk_test_your_stripe_publishable_key_here
+ STRIPE_WEBHOOK_SECRET=whsec_your_webhook_secret_here
+-STRIPE_API_VERSION=2024-06-20
++STRIPE_API_VERSION=2026-09-30.endive
+ STRIPE_SUCCESS_URL=http://localhost:3000/revenue/payments/{CHECKOUT_SESSION_ID}
+ STRIPE_CANCEL_URL=http://localhost:3000/revenue/checkout/canceled
++# Dashboard-owned recurring Price for gitops-retainer. When unset, Checkout uses price_data.
++STRIPE_PRICE_RETAINER=
++# Enable only after Dashboard → Tax → Registrations shows Collecting for buyer jurisdictions.
++STRIPE_TAX_REGISTRATION_ACTIVE=false
+ # Use simulated checkout when a live Stripe key is not available
+ STRIPE_MODE=simulated
+ 
++# AES-256-GCM PII sealing (HKDF-SHA256). Required in production.
++OPENCLAW_ENCRYPTION_KEY=change_me_to_a_long_random_passphrase
++
++# Optional PipeFish control-plane gateway for A2A envelopes
++PIPEFISH_GATEWAY_URL=http://localhost:8080
++
++# Intrusion window (ms) for webhook/dispute/fraud trend detection
++INTRUSION_WINDOW_MS=300000
++
+ # Authentication
+ JWT_SECRET=change_me_to_a_long_random_secret_in_production
+ JWT_EXPIRES_IN=24h
+diff --git a/README.md b/README.md
+index 081c165..4b6cf0b 100644
+--- a/README.md
++++ b/README.md
+@@ -163,23 +163,46 @@ Lanes are fully configurable in `config/lanes.json`. Adjust pricing, response wi
+ 
+ ### Current default offers
+ 
+-| Lane | Price | SLA |
+-|------|-------|-----|
+-| **small-request** | $19 | 24 hours |
+-| **detailed-request** | $29 | 12 hours |
+-| **real-offer** | $49 | 6 hours |
++| Lane | Price | SLA | Checkout |
++|------|-------|-----|----------|
++| **small-request** | $19 | 24 hours | one-time Checkout |
++| **detailed-request** | $29 | 12 hours | one-time Checkout |
++| **real-offer** | $49 | 6 hours | one-time Checkout |
++| **gitops-retainer** | $8,000 / mo | 24 hours | subscription Checkout |
+ 
+ ### Money collection APIs
+ 
+ | Method | Path | Purpose |
+ |--------|------|---------|
+ | `POST` | `/revenue/checkout` | Create a Stripe or simulated Checkout session |
++| `POST` | `/revenue/billing-portal` | Open Stripe Customer Portal (operator auth) |
+ | `POST` | `/revenue/payments/:id/collect` | Complete a simulated payment (non-production) |
+ | `GET` | `/revenue/earnings` | Operator earnings snapshot |
+ | `POST` | `/usage/events` | Record metered usage |
+ | `POST` | `/mcp` | MCP JSON-RPC tools for agents |
+ 
+-Set `STRIPE_SECRET_KEY` to a live/test Stripe key for real collection. Placeholder keys automatically use simulated checkout. Operator routes accept `Authorization: Bearer $OPERATOR_API_KEY` or a JWT signed with `JWT_SECRET`.
++Use a [restricted API key](https://docs.stripe.com/keys.md#manage-your-api-keys) (`STRIPE_RESTRICTED_KEY`, `rk_test_` / `rk_live_`) as the default. `STRIPE_SECRET_KEY` is a local/test fallback; production requires `rk_live_` unless `STRIPE_ALLOW_SECRET_KEY=true` for emergency cutover. Pin API version `2026-09-30.endive` (`stripe@23`). Use a dedicated Stripe sandbox for local work and another for CI — not the account's shared test mode.
++
++Checkout Sessions omit `payment_method_types` so Dashboard dynamic payment methods apply, set `integration_identifier` (`openclaw-` + 8 letters), and fulfill **only from webhooks**. Enable these events on the webhook endpoint:
++
++- `checkout.session.completed` (fulfill only when `payment_status` is not `unpaid`)
++- `checkout.session.async_payment_succeeded` / `checkout.session.async_payment_failed`
++- `customer.subscription.created|updated|deleted`
++- `invoice.paid` / `invoice.payment_succeeded` / `invoice.payment_failed`
++- `charge.dispute.created` / `charge.refunded` / `radar.early_fraud_warning.created`
++
++Do not enable `automatic_tax` until Dashboard → Tax → Registrations shows **Collecting**. Retainer self-serve changes go through the Customer Portal, not a custom card form. Operator routes accept `Authorization: Bearer $OPERATOR_API_KEY` or a JWT signed with `JWT_SECRET`. Placeholder keys automatically use simulated checkout.
++
++### Platform controls
++
++| Area | Behavior |
++|------|----------|
++| Cryptography | Customer emails are sealed with AES-256-GCM (HKDF-SHA256 from `OPENCLAW_ENCRYPTION_KEY`). RAKs are redacted in logs. Webhook HMAC stays on Stripe's `constructEvent`. |
++| Governance | Append-only `/revenue/audit` records checkout, fulfillment, and risk actions. |
++| Observability | `/ready` reports API version, RAK, encryption, and tax-registration state. `/revenue/metrics` exposes counters. |
++| Intrusion | Sliding-window detector for signature failures, disputes, refunds, and Radar early-fraud warnings. |
++| Sales | Public `/revenue/offers` lists one-time lanes and the $8,000/mo GitOps retainer. |
++| Mesh + DAG | Paid/failed webhooks run an async DAG (`record_audit` → `emit_mesh` → `notify_ops`) and publish A2A envelopes (`source`, `target`, `intent`, `payload`, `tokens`, `trace_id`) to the in-process bus and optional `PIPEFISH_GATEWAY_URL`. |
+  
+ ---
+  
+@@ -202,9 +225,9 @@ Build your own services by adding handlers to `src/services/` and registering th
+  
+ This project follows a security-first approach:
+  
+-- **No raw card data** - All payments delegated to Stripe via Moltgate
+-- **API key scoping** - Keys are scoped per-agent and per-lane with least-privilege access
+-- **Webhook verification** - All Moltgate webhooks verified via Ed25519 signatures
++- **No raw card data** - Checkout and Customer Portal keep PANs on Stripe
++- **Restricted API keys** - Production defaults to `rk_live_*` with least privilege
++- **Webhook verification** - Stripe `Stripe-Signature` HMAC plus Moltgate Ed25519 where used
+ - **Rate limiting** - Configurable per-tier rate limits to prevent abuse
+ - **Crypto-agile architecture** - Encryption layer is modular and swappable for post-quantum readiness (NIST FIPS 203/204/205, ML-KEM, ML-DSA compatible)
+ - **Environment isolation** - Secrets managed via `.env`, never hardcoded
+diff --git a/config/lanes.json b/config/lanes.json
+index 6d9205d..204e375 100644
+--- a/config/lanes.json
++++ b/config/lanes.json
+@@ -63,6 +63,26 @@
+       "max_input_chars": 15000,
+       "human_review_required": true,
+       "enabled": true
++    },
++    {
++      "slug": "gitops-retainer",
++      "name": "GitOps Retainer",
++      "price": 8000,
++      "sla_hours": 24,
++      "capabilities": [
++        "agentops_retainer",
++        "gitops_operations",
++        "control_plane_coverage"
++      ],
++      "deliverables": [
++        "monthly_ops_report",
++        "priority_incident_response",
++        "catalog_and_workflow_upkeep"
++      ],
++      "max_input_chars": 20000,
++      "human_review_required": true,
++      "enabled": true,
++      "billing": "subscription"
+     }
+   ]
+ }
+diff --git a/config/openclaw.json b/config/openclaw.json
+index 88c4744..049f413 100644
+--- a/config/openclaw.json
++++ b/config/openclaw.json
+@@ -14,7 +14,8 @@
+     "priority_labels": {
+       "small-request": ["lane:small-request"],
+       "detailed-request": ["lane:detailed-request"],
+-      "real-offer": ["lane:real-offer", "priority", "human-review"]
++      "real-offer": ["lane:real-offer", "priority", "human-review"],
++      "gitops-retainer": ["lane:gitops-retainer", "priority", "retainer", "human-review"]
+     }
+   },
+   "guardrails": {
+diff --git a/config/services.json b/config/services.json
+index bdcd352..3f47a6f 100644
+--- a/config/services.json
++++ b/config/services.json
+@@ -74,6 +74,17 @@
+         "compliance_limits"
+       ],
+       "enabled": true
++    },
++    {
++      "slug": "gitops-retainer",
++      "name": "GitOps / AgentOps Retainer",
++      "description": "Monthly PipeFish GitOps and AgentOps retainer covering control-plane operations, catalog upkeep, and priority incident response.",
++      "recommended_lane": "gitops-retainer",
++      "keywords": ["retainer", "gitops", "agentops", "monthly ops", "control plane"],
++      "deliverable_template": "services/gitops-retainer.md",
++      "outputs": ["monthly_ops_report", "priority_queue", "catalog_delta", "incident_log"],
++      "enabled": true,
++      "billing": "subscription"
+     }
+   ]
+ }
+diff --git a/package-lock.json b/package-lock.json
+index b64050e..20fd12e 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -19,7 +19,7 @@
+         "morgan": "^1.12.1",
+         "pg": "^8.12.0",
+         "rate-limiter-flexible": "^11.1.0",
+-        "stripe": "^16.0.0",
++        "stripe": "23.0.0",
+         "winston": "^3.13.0",
+         "zod": "^3.23.8"
+       },
+@@ -1553,6 +1553,7 @@
+       "version": "26.5.1",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-26.5.1.tgz",
+       "integrity": "sha512-CzNm2FezW4VR/LjG6yUdiEgLE/rAQ9Slj5gCu/C2VrdcW7I0ahNZ8DRbHT7zOZ6r3ONgd/bsQIeSaoDGrd1C6g==",
++      "devOptional": true,
+       "license": "MIT",
+       "dependencies": {
+         "undici-types": "~8.9.0"
+@@ -6590,16 +6591,20 @@
+       }
+     },
+     "node_modules/stripe": {
+-      "version": "16.12.0",
+-      "resolved": "https://registry.npmjs.org/stripe/-/stripe-16.12.0.tgz",
+-      "integrity": "sha512-H7eFVLDxeTNNSn4JTRfL2//LzCbDrMSZ+2q1c7CanVWgK2qIW5TwS+0V7N9KcKZZNpYh/uCqK0PyZh/2UsaAtQ==",
++      "version": "23.0.0",
++      "resolved": "https://registry.npmjs.org/stripe/-/stripe-23.0.0.tgz",
++      "integrity": "sha512-MDE2A5ZVVluYURORaZEVghSmnLJc3w6aHAlZSxDQMsOjOb3V0O6ro/CiaeFlJS4N7uIVmsg98ocRsPmUK6YfyA==",
+       "license": "MIT",
+-      "dependencies": {
+-        "@types/node": ">=8.1.0",
+-        "qs": "^6.11.0"
+-      },
+       "engines": {
+-        "node": ">=12.*"
++        "node": ">=20"
++      },
++      "peerDependencies": {
++        "@types/node": ">=20"
++      },
++      "peerDependenciesMeta": {
++        "@types/node": {
++          "optional": true
++        }
+       }
+     },
+     "node_modules/superagent": {
+@@ -7029,6 +7034,7 @@
+       "version": "8.9.0",
+       "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-8.9.0.tgz",
+       "integrity": "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==",
++      "devOptional": true,
+       "license": "MIT"
+     },
+     "node_modules/unpipe": {
+diff --git a/package.json b/package.json
+index 34c719a..2d69422 100644
+--- a/package.json
++++ b/package.json
+@@ -31,7 +31,7 @@
+     "morgan": "^1.12.1",
+     "pg": "^8.12.0",
+     "rate-limiter-flexible": "^11.1.0",
+-    "stripe": "^16.0.0",
++    "stripe": "23.0.0",
+     "winston": "^3.13.0",
+     "zod": "^3.23.8"
+   },
+diff --git a/services/gitops-retainer.md b/services/gitops-retainer.md
+new file mode 100644
+index 0000000..4859c72
+--- /dev/null
++++ b/services/gitops-retainer.md
+@@ -0,0 +1,22 @@
++# GitOps / AgentOps Retainer
++
++## What I Need
++
++- Organization or control-plane scope
++- Priority incident contacts
++- Repos, catalogs, and workflows in scope
++- Current on-call or operator constraints
++
++## Deliverables
++
++- Monthly operations report
++- Priority incident response within the purchased SLA
++- Catalog and workflow upkeep
++- Agent routing and secret-hygiene review notes
++
++## Operator Checklist
++
++- Confirm this is a subscription retainer, not a one-time Moltgate ping
++- Keep card data on Stripe Checkout / Customer Portal
++- Do not enable Stripe Tax until a Collecting registration exists
++- Route self-serve cancel / payment-method changes through the Customer Portal
+diff --git a/src/agents/orchestrator.ts b/src/agents/orchestrator.ts
+index 6ee7df8..9968d83 100644
+--- a/src/agents/orchestrator.ts
++++ b/src/agents/orchestrator.ts
+@@ -43,6 +43,7 @@ const SERVICE_AGENT_MAP: Record<string, string> = {
+   'openclaw-setup': 'config-agent',
+   'ai-roadmap': 'revenue-intake-orchestrator',
+   'sara-plus-touchless': 'sara-plus-seller-agent',
++  'gitops-retainer': 'compliance-quality-agent',
+ };
+ 
+ let catalogCache: AgentCatalog | undefined;
+diff --git a/src/billing/checkout.ts b/src/billing/checkout.ts
+index a3f11d0..96db694 100644
+--- a/src/billing/checkout.ts
++++ b/src/billing/checkout.ts
+@@ -2,9 +2,15 @@ import { assignAgents } from '../agents/orchestrator';
+ import { classifyPaidRequest } from '../revenue/serviceCatalog';
+ import { ClassifiedPaidRequest, PaidRequestInput } from '../revenue/types';
+ import { optionalEnv } from '../lib/env';
++import { recordAudit } from '../governance/auditLog';
++import { incMetric } from '../observability/metrics';
+ import { createPayment, getPayment, markPaymentStatus } from './ledger';
+-import { PaymentRecord } from './types';
+-import { getStripe, isSimulatedStripe } from './stripeClient';
++import { BillingMode, PaymentRecord } from './types';
++import {
++  generateIntegrationIdentifier,
++  getStripe,
++  isSimulatedStripe,
++} from './stripeClient';
+ 
+ export interface CheckoutRequest extends PaidRequestInput {
+   customer_email: string;
+@@ -19,12 +25,65 @@ export interface CheckoutResult {
+   simulated: boolean;
+ }
+ 
++export interface BillingPortalRequest {
++  customer_id: string;
++  return_url?: string;
++}
++
++export interface BillingPortalResult {
++  url: string;
++  simulated: boolean;
++}
++
+ const defaultSuccessUrl = (): string =>
+   optionalEnv('STRIPE_SUCCESS_URL', 'http://localhost:3000/revenue/payments/{CHECKOUT_SESSION_ID}');
+ 
+ const defaultCancelUrl = (): string =>
+   optionalEnv('STRIPE_CANCEL_URL', 'http://localhost:3000/revenue/checkout/canceled');
+ 
++const taxRegistrationActive = (): boolean => process.env.STRIPE_TAX_REGISTRATION_ACTIVE === 'true';
++
++export function checkoutModeFor(classification: ClassifiedPaidRequest): BillingMode {
++  return classification.service.billing ?? classification.lane.billing ?? 'payment';
++}
++
++const buildLineItems = (
++  classification: ClassifiedPaidRequest,
++  mode: BillingMode,
++  amountCents: number,
++  currency: string,
++): StripeCheckoutLineItem[] => {
++  const retainerPrice = optionalEnv('STRIPE_PRICE_RETAINER');
++  if (mode === 'subscription' && retainerPrice && classification.service.slug === 'gitops-retainer') {
++    return [{ price: retainerPrice, quantity: 1 }];
++  }
++
++  const priceData: StripeCheckoutLineItem['price_data'] = {
++    currency,
++    unit_amount: amountCents,
++    product_data: {
++      name: `${classification.service.name} (${classification.lane.name})`,
++      description: classification.input_summary,
++    },
++  };
++  if (mode === 'subscription') {
++    priceData.recurring = { interval: 'month' };
++  }
++
++  return [{ quantity: 1, price_data: priceData }];
++};
++
++type StripeCheckoutLineItem = {
++  quantity?: number;
++  price?: string;
++  price_data?: {
++    currency: string;
++    unit_amount: number;
++    product_data: { name: string; description?: string };
++    recurring?: { interval: 'month' };
++  };
++};
++
+ export async function createLaneCheckout(input: CheckoutRequest): Promise<CheckoutResult> {
+   if (!input.customer_email?.trim()) {
+     throw new Error('customer_email is required');
+@@ -35,6 +94,17 @@ export async function createLaneCheckout(input: CheckoutRequest): Promise<Checko
+   const simulated = isSimulatedStripe();
+   const amountCents = Math.round(classification.estimated_revenue * 100);
+   const currency = classification.currency.toLowerCase();
++  const billing = checkoutModeFor(classification);
++
++  incMetric(`checkout.${billing}`);
++  recordAudit({
++    actor: input.source ?? 'api',
++    action: 'checkout.create',
++    resource: classification.service.slug,
++    outcome: simulated ? 'simulated' : 'stripe',
++    trace_id: classification.requested_at,
++    details: { lane: classification.lane.slug, billing, email_present: String(Boolean(input.customer_email)) },
++  });
+ 
+   const payment = createPayment({
+     lane: classification.lane.slug,
+@@ -46,6 +116,7 @@ export async function createLaneCheckout(input: CheckoutRequest): Promise<Checko
+     metadata: {
+       agent: agentPlan.primary.slug,
+       source: input.source ?? 'api',
++      billing,
+     },
+   });
+ 
+@@ -64,34 +135,41 @@ export async function createLaneCheckout(input: CheckoutRequest): Promise<Checko
+   }
+ 
+   const stripe = getStripe();
+-  const successUrl = (input.success_url ?? defaultSuccessUrl()).replace('{CHECKOUT_SESSION_ID}', '{CHECKOUT_SESSION_ID}');
+-  const session = await stripe.checkout.sessions.create({
+-    mode: 'payment',
++  const successUrl = (input.success_url ?? defaultSuccessUrl()).replace(
++    '{CHECKOUT_SESSION_ID}',
++    '{CHECKOUT_SESSION_ID}',
++  );
++  const metadata = {
++    payment_id: payment.id,
++    lane: classification.lane.slug,
++    service: classification.service.slug,
++    agent: agentPlan.primary.slug,
++    billing,
++  };
++
++  const sessionParams: Parameters<typeof stripe.checkout.sessions.create>[0] = {
++    mode: billing,
+     customer_email: input.customer_email,
+     success_url: successUrl.includes('{CHECKOUT_SESSION_ID}')
+       ? successUrl
+       : `${successUrl}?session_id={CHECKOUT_SESSION_ID}`,
+     cancel_url: input.cancel_url ?? defaultCancelUrl(),
+     client_reference_id: payment.id,
+-    metadata: {
+-      payment_id: payment.id,
+-      lane: classification.lane.slug,
+-      service: classification.service.slug,
+-      agent: agentPlan.primary.slug,
+-    },
+-    line_items: [
+-      {
+-        quantity: 1,
+-        price_data: {
+-          currency,
+-          unit_amount: amountCents,
+-          product_data: {
+-            name: `${classification.service.name} (${classification.lane.name})`,
+-            description: classification.input_summary,
+-          },
+-        },
+-      },
+-    ],
++    integration_identifier: generateIntegrationIdentifier(),
++    metadata,
++    line_items: buildLineItems(classification, billing, amountCents, currency),
++  };
++
++  if (billing === 'subscription') {
++    sessionParams.subscription_data = { metadata };
++  }
++
++  if (taxRegistrationActive()) {
++    sessionParams.automatic_tax = { enabled: true };
++  }
++
++  const session = await stripe.checkout.sessions.create(sessionParams, {
++    idempotencyKey: payment.id,
+   });
+ 
+   if (!session.url) {
+@@ -111,6 +189,37 @@ export async function createLaneCheckout(input: CheckoutRequest): Promise<Checko
+   };
+ }
+ 
++export async function createBillingPortalSession(
++  input: BillingPortalRequest,
++): Promise<BillingPortalResult> {
++  if (!input.customer_id?.trim()) {
++    throw new Error('customer_id is required');
++  }
++
++  const returnUrl =
++    input.return_url ??
++    `${optionalEnv('PUBLIC_BASE_URL', 'http://localhost:3000')}/revenue/earnings`;
++
++  if (isSimulatedStripe()) {
++    return {
++      url: `${returnUrl}?portal=simulated&customer=${encodeURIComponent(input.customer_id)}`,
++      simulated: true,
++    };
++  }
++
++  const stripe = getStripe();
++  const session = await stripe.billingPortal.sessions.create({
++    customer: input.customer_id,
++    return_url: returnUrl,
++  });
++
++  if (!session.url) {
++    throw new Error('Stripe did not return a billing portal URL');
++  }
++
++  return { url: session.url, simulated: false };
++}
++
+ export function simulatePaymentCollection(paymentId: string): PaymentRecord {
+   if (process.env.NODE_ENV === 'production') {
+     throw new Error('Simulated collection is disabled in production');
+diff --git a/src/billing/ledger.ts b/src/billing/ledger.ts
+index 334aa0c..e083536 100644
+--- a/src/billing/ledger.ts
++++ b/src/billing/ledger.ts
+@@ -1,4 +1,9 @@
+ import { newId } from '../lib/ids';
++import { resetAuditLog } from '../governance/auditLog';
++import { resetMesh } from '../mesh/envelope';
++import { resetMetrics } from '../observability/metrics';
++import { openSealed, seal } from '../security/crypto';
++import { resetIntrusion } from '../security/intrusion';
+ import { EarningsSnapshot, PaymentRecord, PaymentStatus } from './types';
+ 
+ const payments = new Map<string, PaymentRecord>();
+@@ -8,12 +13,17 @@ const nowIso = (): string => new Date().toISOString();
+ 
+ const clone = (record: PaymentRecord): PaymentRecord => ({
+   ...record,
++  customer_email: openSealed(record.customer_email),
+   metadata: { ...record.metadata },
+ });
+ 
+ export function resetLedger(): void {
+   payments.clear();
+   processedStripeEvents.clear();
++  resetAuditLog();
++  resetMetrics();
++  resetIntrusion();
++  resetMesh();
+ }
+ 
+ export function rememberStripeEvent(eventId: string): boolean {
+@@ -42,7 +52,7 @@ export function createPayment(input: {
+     service: input.service,
+     amount_cents: input.amount_cents,
+     currency: input.currency.toLowerCase(),
+-    customer_email: input.customer_email,
++    customer_email: seal(input.customer_email),
+     checkout_url: input.checkout_url,
+     stripe_session_id: input.stripe_session_id,
+     simulated: input.simulated,
+@@ -95,6 +105,25 @@ export function findPaymentByStripeInvoice(invoiceId: string): PaymentRecord | u
+   return found ? clone(found) : undefined;
+ }
+ 
++export function findPaymentByStripePaymentIntent(paymentIntentId: string): PaymentRecord | undefined {
++  const found = Array.from(payments.values()).find(
++    (item) => item.stripe_payment_intent_id === paymentIntentId,
++  );
++  return found ? clone(found) : undefined;
++}
++
++export function findPaymentByStripeSubscription(subscriptionId: string): PaymentRecord | undefined {
++  const found = Array.from(payments.values()).find(
++    (item) => item.stripe_subscription_id === subscriptionId,
++  );
++  return found ? clone(found) : undefined;
++}
++
++export function findPaymentByMetadataId(paymentId: string | undefined | null): PaymentRecord | undefined {
++  if (!paymentId) return undefined;
++  return getPayment(paymentId);
++}
++
+ export function recordInvoicePayment(input: {
+   stripe_invoice_id: string;
+   amount_cents: number;
+diff --git a/src/billing/stripeClient.ts b/src/billing/stripeClient.ts
+index 3e85998..4b26436 100644
+--- a/src/billing/stripeClient.ts
++++ b/src/billing/stripeClient.ts
+@@ -1,42 +1,65 @@
++import { randomInt } from 'crypto';
+ import Stripe from 'stripe';
+ 
+-import { requireEnv } from '../lib/env';
++export const STRIPE_API_VERSION = '2026-09-30.endive' as const;
+ 
+-const rawKey = process.env.STRIPE_SECRET_KEY?.trim() || '';
+-const isProd = process.env.NODE_ENV === 'production';
++const PLACEHOLDER_PATTERN = /placeholder|your_stripe|fixture_key|bare_env/i;
+ 
+-// Test or placeholder indicators
+-const isPlaceholderKey =
+-  !rawKey ||
+-  /placeholder|your_stripe|fixture_key|bare_env/i.test(rawKey) ||
+-  rawKey.startsWith('sk_test_ci') ||
+-  rawKey === 'sk_test_placeholder';
++const readKey = (name: 'STRIPE_RESTRICTED_KEY' | 'STRIPE_SECRET_KEY'): string =>
++  process.env[name]?.trim() || '';
+ 
+-const isLiveKey = rawKey.startsWith('sk_live_') || rawKey.startsWith('rk_live_');
++const allowSecretKey = (): boolean => process.env.STRIPE_ALLOW_SECRET_KEY === 'true';
+ 
+-// Strict production gate: Fail closed at module initialization
+-if (isProd && !isLiveKey) {
++const isLiveRestricted = (key: string): boolean => key.startsWith('rk_live_');
++
++const isLiveSecret = (key: string): boolean => key.startsWith('sk_live_');
++
++export function assertProductionKey(key: string): void {
++  if (process.env.NODE_ENV !== 'production') {
++    return;
++  }
++  if (isLiveRestricted(key)) {
++    return;
++  }
++  if (allowSecretKey() && isLiveSecret(key)) {
++    return;
++  }
+   throw new Error(
+-    `[FATAL] STRIPE_SECRET_KEY must be a valid live Stripe key (sk_live_* / rk_live_*) in production. ` +
+-      `Simulated checkout fallback is strictly forbidden in production.`
++    '[FATAL] STRIPE_RESTRICTED_KEY must be a valid live restricted key (rk_live_*) in production. ' +
++      'Set STRIPE_ALLOW_SECRET_KEY=true only as an emergency cutover to sk_live_*. ' +
++      'Simulated checkout fallback is strictly forbidden in production.',
++  );
++}
++
++export function resolveStripeKey(): string {
++  const key = readKey('STRIPE_RESTRICTED_KEY') || readKey('STRIPE_SECRET_KEY');
++  if (!key) {
++    throw new Error(
++      'Missing required Stripe key: set STRIPE_RESTRICTED_KEY (preferred) or STRIPE_SECRET_KEY',
++    );
++  }
++  assertProductionKey(key);
++  return key;
++}
++
++export function isPlaceholderKey(key: string): boolean {
++  return (
++    !key ||
++    PLACEHOLDER_PATTERN.test(key) ||
++    key.startsWith('sk_test_ci') ||
++    key === 'sk_test_placeholder' ||
++    key.startsWith('rk_test_placeholder')
+   );
+ }
+ 
+ let stripe: Stripe | undefined;
+ 
+ export function getStripe(): Stripe {
+-  if (process.env.NODE_ENV === 'production') {
+-    const currentKey = process.env.STRIPE_SECRET_KEY?.trim() || '';
+-    if (!currentKey.startsWith('sk_live_') && !currentKey.startsWith('rk_live_')) {
+-      throw new Error(
+-        `[FATAL] STRIPE_SECRET_KEY must be a valid live Stripe key (sk_live_* / rk_live_*) in production. ` +
+-          `Simulated checkout fallback is strictly forbidden in production.`
+-      );
+-    }
+-  }
++  const key = resolveStripeKey();
+   if (!stripe) {
+-    stripe = new Stripe(requireEnv('STRIPE_SECRET_KEY'), {
+-      apiVersion: '2024-06-20',
++    stripe = new Stripe(key, {
++      apiVersion: STRIPE_API_VERSION,
++      typescript: true,
+     });
+   }
+   return stripe;
+@@ -47,32 +70,34 @@ export function resetStripeClient(): void {
+ }
+ 
+ export function isSimulatedStripe(): boolean {
+-  const currentKey = process.env.STRIPE_SECRET_KEY?.trim() ?? '';
+   if (process.env.NODE_ENV === 'production') {
+-    if (!currentKey.startsWith('sk_live_') && !currentKey.startsWith('rk_live_')) {
+-      throw new Error(
+-        `[FATAL] STRIPE_SECRET_KEY must be a valid live Stripe key (sk_live_* / rk_live_*) in production. ` +
+-          `Simulated checkout fallback is strictly forbidden in production.`
+-      );
+-    }
++    resolveStripeKey();
+     return false;
+   }
+   if (process.env.STRIPE_MODE === 'live') {
+     return false;
+   }
++  const key = readKey('STRIPE_RESTRICTED_KEY') || readKey('STRIPE_SECRET_KEY');
+   return (
+     process.env.STRIPE_MODE === 'simulated' ||
+     process.env.NODE_ENV === 'test' ||
+-    !currentKey ||
+-    isPlaceholderKey ||
+-    /placeholder|your_stripe|fixture_key|bare_env/i.test(currentKey) ||
+-    currentKey.startsWith('sk_test_ci')
++    !key ||
++    isPlaceholderKey(key)
+   );
+ }
+ 
++export function generateIntegrationIdentifier(prefix = 'openclaw'): string {
++  const letters = 'abcdefghijklmnopqrstuvwxyz';
++  let suffix = '';
++  for (let i = 0; i < 8; i += 1) {
++    suffix += letters[randomInt(letters.length)];
++  }
++  return `${prefix}-${suffix}`;
++}
++
+ export const stripeClient: Stripe | null = isSimulatedStripe()
+   ? null
+-  : new Stripe(rawKey, {
+-      apiVersion: '2024-06-20',
++  : new Stripe(resolveStripeKey(), {
++      apiVersion: STRIPE_API_VERSION,
+       typescript: true,
+     });
+diff --git a/src/billing/types.ts b/src/billing/types.ts
+index 2512e27..4aad2c0 100644
+--- a/src/billing/types.ts
++++ b/src/billing/types.ts
+@@ -1,5 +1,7 @@
+ export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'canceled';
+ 
++export type BillingMode = 'payment' | 'subscription';
++
+ export interface PaymentRecord {
+   id: string;
+   status: PaymentStatus;
+@@ -11,6 +13,8 @@ export interface PaymentRecord {
+   stripe_session_id?: string;
+   stripe_payment_intent_id?: string;
+   stripe_invoice_id?: string;
++  stripe_subscription_id?: string;
++  stripe_customer_id?: string;
+   checkout_url?: string;
+   simulated: boolean;
+   created_at: string;
+diff --git a/src/commerce/offers.ts b/src/commerce/offers.ts
+new file mode 100644
+index 0000000..dda2f53
+--- /dev/null
++++ b/src/commerce/offers.ts
+@@ -0,0 +1,32 @@
++import { listRevenueLanes, listRevenueServices } from '../revenue/serviceCatalog';
++
++export interface PublicOffer {
++  slug: string;
++  name: string;
++  price: number;
++  currency: string;
++  billing: 'payment' | 'subscription';
++  sla_hours: number;
++  cta: string;
++  recommended_services: string[];
++}
++
++export function listPublicOffers(): PublicOffer[] {
++  const services = listRevenueServices();
++  const lanes = listRevenueLanes();
++  return lanes.map((lane) => {
++    const billing = lane.billing ?? 'payment';
++    return {
++      slug: lane.slug,
++      name: lane.name,
++      price: lane.price,
++      currency: 'USD',
++      billing,
++      sla_hours: lane.sla_hours,
++      cta: billing === 'subscription' ? 'Start monthly retainer on Stripe Checkout' : 'Pay this request on Stripe Checkout',
++      recommended_services: services
++        .filter((service) => service.recommended_lane === lane.slug)
++        .map((service) => service.slug),
++    };
++  });
++}
+diff --git a/src/governance/auditLog.ts b/src/governance/auditLog.ts
+new file mode 100644
+index 0000000..6ca0a9a
+--- /dev/null
++++ b/src/governance/auditLog.ts
+@@ -0,0 +1,37 @@
++import { newId } from '../lib/ids';
++
++export interface AuditEvent {
++  id: string;
++  at: string;
++  actor: string;
++  action: string;
++  resource: string;
++  outcome: string;
++  trace_id: string;
++  details: Record<string, string>;
++}
++
++const events: AuditEvent[] = [];
++const MAX_EVENTS = 5_000;
++
++export function resetAuditLog(): void {
++  events.length = 0;
++}
++
++export function recordAudit(input: Omit<AuditEvent, 'id' | 'at'>): AuditEvent {
++  const event: AuditEvent = {
++    ...input,
++    id: newId('aud'),
++    at: new Date().toISOString(),
++    details: { ...input.details },
++  };
++  events.push(event);
++  if (events.length > MAX_EVENTS) {
++    events.splice(0, events.length - MAX_EVENTS);
++  }
++  return event;
++}
++
++export function listAuditEvents(limit = 100): AuditEvent[] {
++  return events.slice(-limit).reverse().map((event) => ({ ...event, details: { ...event.details } }));
++}
+diff --git a/src/index.ts b/src/index.ts
+index e134121..002d464 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -9,6 +9,7 @@ import { createLogger, format, transports } from 'winston';
+ import { revenueRouter } from './routes/revenue';
+ import { usageRouter } from './routes/usage';
+ import { mcpRouter } from './routes/mcp';
++import { readinessReport } from './observability/readiness';
+ import { stripeWebhookHandler } from './webhooks/stripe.webhook';
+ import { githubWebhookHandler } from './webhooks/github.webhook';
+ import { clerkWebhookHandler } from './webhooks/clerk.webhook';
+@@ -64,7 +65,26 @@ app.post(
+ );
+ 
+ app.use(globalLimiter);
+-app.use(helmet());
++app.use(
++  helmet({
++    contentSecurityPolicy: {
++      useDefaults: true,
++      directives: {
++        'script-src': ["'self'", 'https://js.stripe.com', 'https://*.js.stripe.com'],
++        'connect-src': ["'self'", 'https://api.stripe.com', 'https://*.stripe.com'],
++        'frame-src': [
++          "'self'",
++          'https://js.stripe.com',
++          'https://hooks.stripe.com',
++          'https://checkout.stripe.com',
++          'https://*.js.stripe.com',
++          'https://*.link.com',
++        ],
++        'img-src': ["'self'", 'data:', 'https://*.stripe.com'],
++      },
++    },
++  }),
++);
+ app.use(cors({
+   origin: process.env.CORS_ORIGIN ?? 'http://localhost:3000',
+   credentials: process.env.CORS_CREDENTIALS === 'true',
+@@ -78,6 +98,11 @@ app.get('/health', (_req: Request, res: Response) => {
+   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+ });
+ 
++app.get('/ready', (_req: Request, res: Response) => {
++  const report = readinessReport();
++  res.status(report.status === 'ok' ? 200 : 503).json(report);
++});
++
+ app.get('/', (_req: Request, res: Response) => {
+   res.json({
+     name: 'openclaw-revenue-engine',
+@@ -88,6 +113,9 @@ app.get('/', (_req: Request, res: Response) => {
+     services: '/revenue/services',
+     agents: '/revenue/agents',
+     checkout: '/revenue/checkout',
++    billingPortal: '/revenue/billing-portal',
++    offers: '/revenue/offers',
++    ready: '/ready',
+     earnings: '/revenue/earnings',
+     usage: '/usage/summary',
+     mcp: '/mcp',
+diff --git a/src/mesh/envelope.ts b/src/mesh/envelope.ts
+new file mode 100644
+index 0000000..9a3ad7a
+--- /dev/null
++++ b/src/mesh/envelope.ts
+@@ -0,0 +1,81 @@
++import { randomUUID } from 'crypto';
++
++export interface Envelope {
++  id: string;
++  source: string;
++  target: string;
++  intent: string;
++  payload: Record<string, unknown>;
++  tokens: string[];
++  trace_id: string;
++  created_at: string;
++}
++
++const audit: Envelope[] = [];
++const handlers = new Map<string, Array<(envelope: Envelope) => Envelope | void | Promise<Envelope | void>>>();
++
++export function resetMesh(): void {
++  audit.length = 0;
++  handlers.clear();
++}
++
++export function subscribe(
++  target: string,
++  handler: (envelope: Envelope) => Envelope | void | Promise<Envelope | void>,
++): void {
++  const list = handlers.get(target) ?? [];
++  list.push(handler);
++  handlers.set(target, list);
++}
++
++export function createEnvelope(input: {
++  source: string;
++  target: string;
++  intent: string;
++  payload?: Record<string, unknown>;
++  tokens?: string[];
++  trace_id?: string;
++}): Envelope {
++  return {
++    id: randomUUID(),
++    source: input.source,
++    target: input.target,
++    intent: input.intent,
++    payload: input.payload ?? {},
++    tokens: input.tokens ?? ['commerce:write'],
++    trace_id: input.trace_id ?? randomUUID(),
++    created_at: new Date().toISOString(),
++  };
++}
++
++export async function publish(envelope: Envelope): Promise<Envelope[]> {
++  audit.push(envelope);
++  const replies: Envelope[] = [];
++  for (const handler of handlers.get(envelope.target) ?? []) {
++    const result = await handler(envelope);
++    if (result) {
++      audit.push(result);
++      replies.push(result);
++    }
++  }
++
++  const gateway = process.env.PIPEFISH_GATEWAY_URL?.trim();
++  if (gateway && process.env.NODE_ENV !== 'test') {
++    try {
++      await fetch(`${gateway.replace(/\/$/, '')}/v1/envelopes`, {
++        method: 'POST',
++        headers: { 'content-type': 'application/json' },
++        body: JSON.stringify(envelope),
++      });
++    } catch (err) {
++      const message = err instanceof Error ? err.message : 'Unknown mesh publish error';
++      console.error(`PipeFish gateway publish failed: ${message}`);
++    }
++  }
++
++  return replies;
++}
++
++export function listMeshAudit(limit = 50): Envelope[] {
++  return audit.slice(-limit).reverse().map((item) => ({ ...item, payload: { ...item.payload } }));
++}
+diff --git a/src/observability/metrics.ts b/src/observability/metrics.ts
+new file mode 100644
+index 0000000..fafd8de
+--- /dev/null
++++ b/src/observability/metrics.ts
+@@ -0,0 +1,26 @@
++const counters = new Map<string, number>();
++const lastEvents = new Map<string, string>();
++
++export function resetMetrics(): void {
++  counters.clear();
++  lastEvents.clear();
++}
++
++export function incMetric(name: string, by = 1): number {
++  const next = (counters.get(name) ?? 0) + by;
++  counters.set(name, next);
++  lastEvents.set(name, new Date().toISOString());
++  return next;
++}
++
++export function getMetric(name: string): number {
++  return counters.get(name) ?? 0;
++}
++
++export function metricsSnapshot(): Record<string, { count: number; last_at?: string }> {
++  const snapshot: Record<string, { count: number; last_at?: string }> = {};
++  for (const [name, count] of counters.entries()) {
++    snapshot[name] = { count, last_at: lastEvents.get(name) };
++  }
++  return snapshot;
++}
+diff --git a/src/observability/readiness.ts b/src/observability/readiness.ts
+new file mode 100644
+index 0000000..c1bda03
+--- /dev/null
++++ b/src/observability/readiness.ts
+@@ -0,0 +1,41 @@
++import { encryptionEnabled } from '../security/crypto';
++import { STRIPE_API_VERSION, isSimulatedStripe } from '../billing/stripeClient';
++
++export interface ReadinessReport {
++  status: 'ok' | 'degraded';
++  timestamp: string;
++  stripe: {
++    api_version: typeof STRIPE_API_VERSION;
++    mode: 'simulated' | 'live';
++    rak_configured: boolean;
++  };
++  encryption: { enabled: boolean };
++  tax_registration_active: boolean;
++  mesh_gateway: boolean;
++}
++
++export function readinessReport(): ReadinessReport {
++  const rakConfigured = Boolean(process.env.STRIPE_RESTRICTED_KEY?.trim());
++  const encryption = encryptionEnabled();
++  let mode: 'simulated' | 'live' = 'simulated';
++  let stripeReady = true;
++  try {
++    mode = isSimulatedStripe() ? 'simulated' : 'live';
++  } catch {
++    stripeReady = false;
++  }
++  const degraded =
++    !stripeReady || (process.env.NODE_ENV === 'production' && (!rakConfigured || !encryption));
++  return {
++    status: degraded ? 'degraded' : 'ok',
++    timestamp: new Date().toISOString(),
++    stripe: {
++      api_version: STRIPE_API_VERSION,
++      mode,
++      rak_configured: rakConfigured,
++    },
++    encryption: { enabled: encryption },
++    tax_registration_active: process.env.STRIPE_TAX_REGISTRATION_ACTIVE === 'true',
++    mesh_gateway: Boolean(process.env.PIPEFISH_GATEWAY_URL?.trim()),
++  };
++}
+diff --git a/src/orchestration/billingDag.ts b/src/orchestration/billingDag.ts
+new file mode 100644
+index 0000000..9df0bdc
+--- /dev/null
++++ b/src/orchestration/billingDag.ts
+@@ -0,0 +1,68 @@
++import { recordAudit } from '../governance/auditLog';
++import { createEnvelope, publish } from '../mesh/envelope';
++import { incMetric } from '../observability/metrics';
++import { PaymentRecord } from '../billing/types';
++import { DAG, DAGResult } from './dag';
++
++export interface BillingDagInput {
++  payment: PaymentRecord;
++  eventType: string;
++  eventId: string;
++  outcome: 'paid' | 'failed' | 'pending' | 'canceled';
++}
++
++export async function runBillingFulfillmentDag(input: BillingDagInput): Promise<DAGResult> {
++  const dag = new DAG('billing-fulfillment');
++  dag.addNode('record_audit', () => {
++    incMetric(`billing.dag.${input.outcome}`);
++    return recordAudit({
++      actor: 'stripe-webhook',
++      action: 'fulfillment_dag',
++      resource: input.payment.id,
++      outcome: input.outcome,
++      trace_id: input.eventId,
++      details: {
++        event_type: input.eventType,
++        lane: input.payment.lane,
++        service: input.payment.service,
++        amount_cents: String(input.payment.amount_cents),
++      },
++    });
++  });
++  dag.addNode(
++    'emit_mesh',
++    async () => {
++      const envelope = createEnvelope({
++        source: 'openclaw-revenue-engine',
++        target: 'pipefish.control-plane',
++        intent: input.outcome === 'paid' ? 'commerce.recognize' : 'commerce.risk',
++        tokens: ['commerce:write', 'mesh:route'],
++        trace_id: input.eventId,
++        payload: {
++          payment_id: input.payment.id,
++          lane: input.payment.lane,
++          service: input.payment.service,
++          status: input.outcome,
++          sku: input.payment.service === 'gitops-retainer' ? 'mesh.retain.ops' : input.payment.service,
++        },
++      });
++      return publish(envelope);
++    },
++    ['record_audit'],
++  );
++  dag.addNode(
++    'notify_ops',
++    (ctx) => {
++      incMetric('billing.ops.notify');
++      return {
++        notified: true,
++        mesh_replies: Array.isArray((ctx.deps as Record<string, unknown>)?.emit_mesh)
++          ? ((ctx.deps as Record<string, unknown>).emit_mesh as unknown[]).length
++          : 0,
++      };
++    },
++    ['emit_mesh'],
++  );
++
++  return dag.run({ payment: input.payment, eventType: input.eventType });
++}
+diff --git a/src/orchestration/dag.ts b/src/orchestration/dag.ts
+new file mode 100644
+index 0000000..ae5c38e
+--- /dev/null
++++ b/src/orchestration/dag.ts
+@@ -0,0 +1,124 @@
++export type NodeStatus = 'ok' | 'error' | 'skipped';
++
++export type NodeFn = (ctx: Record<string, unknown>) => unknown | Promise<unknown>;
++
++export interface NodeResult {
++  name: string;
++  status: NodeStatus;
++  output?: unknown;
++  error?: string;
++}
++
++export interface DAGResult {
++  name: string;
++  status: 'ok' | 'error';
++  nodes: Record<string, NodeResult>;
++}
++
++interface Node {
++  name: string;
++  fn: NodeFn;
++  deps: string[];
++}
++
++export class DAG {
++  readonly name: string;
++  private readonly nodes = new Map<string, Node>();
++
++  constructor(name: string) {
++    this.name = name;
++  }
++
++  addNode(name: string, fn: NodeFn, deps: string[] = []): this {
++    if (this.nodes.has(name)) {
++      throw new Error(`duplicate node: ${name}`);
++    }
++    this.nodes.set(name, { name, fn, deps: [...deps] });
++    return this;
++  }
++
++  private validate(): void {
++    for (const node of this.nodes.values()) {
++      for (const dep of node.deps) {
++        if (!this.nodes.has(dep)) {
++          throw new Error(`${node.name} depends on missing node ${dep}`);
++        }
++      }
++    }
++
++    const visiting = new Set<string>();
++    const seen = new Set<string>();
++    const walk = (name: string): void => {
++      if (seen.has(name)) return;
++      if (visiting.has(name)) {
++        throw new Error(`cycle detected at ${name}`);
++      }
++      visiting.add(name);
++      for (const dep of this.nodes.get(name)?.deps ?? []) {
++        walk(dep);
++      }
++      visiting.delete(name);
++      seen.add(name);
++    };
++    for (const name of this.nodes.keys()) {
++      walk(name);
++    }
++  }
++
++  async run(context: Record<string, unknown> = {}): Promise<DAGResult> {
++    this.validate();
++    const results: Record<string, NodeResult> = {};
++    const inDegree = new Map<string, number>();
++    const dependents = new Map<string, string[]>();
++
++    for (const node of this.nodes.values()) {
++      inDegree.set(node.name, node.deps.length);
++      dependents.set(node.name, dependents.get(node.name) ?? []);
++      for (const dep of node.deps) {
++        const list = dependents.get(dep) ?? [];
++        list.push(node.name);
++        dependents.set(dep, list);
++      }
++    }
++
++    let ready = [...inDegree.entries()].filter(([, degree]) => degree === 0).map(([name]) => name);
++
++    const execute = async (name: string): Promise<NodeResult> => {
++      const node = this.nodes.get(name);
++      if (!node) {
++        return { name, status: 'error', error: 'missing node' };
++      }
++      if (node.deps.some((dep) => results[dep]?.status !== 'ok')) {
++        return { name, status: 'skipped', error: 'upstream failed' };
++      }
++      try {
++        const local = {
++          ...context,
++          deps: Object.fromEntries(node.deps.map((dep) => [dep, results[dep]?.output])),
++        };
++        const output = await node.fn(local);
++        return { name, status: 'ok', output };
++      } catch (err) {
++        return { name, status: 'error', error: err instanceof Error ? err.message : 'Unknown error' };
++      }
++    };
++
++    while (ready.length) {
++      const batch = ready;
++      ready = [];
++      const completed = await Promise.all(batch.map((name) => execute(name)));
++      for (const result of completed) {
++        results[result.name] = result;
++        for (const child of dependents.get(result.name) ?? []) {
++          inDegree.set(child, (inDegree.get(child) ?? 1) - 1);
++          if (inDegree.get(child) === 0) {
++            ready.push(child);
++          }
++        }
++      }
++    }
++
++    const status = Object.values(results).some((node) => node.status === 'error') ? 'error' : 'ok';
++    return { name: this.name, status, nodes: results };
++  }
++}
+diff --git a/src/revenue/config.ts b/src/revenue/config.ts
+index 9be18de..deab351 100644
+--- a/src/revenue/config.ts
++++ b/src/revenue/config.ts
+@@ -18,6 +18,8 @@ const hasText = (value: unknown): value is string => typeof value === 'string' &
+ const hasNumberAtLeast = (value: unknown, minimum: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= minimum;
+ const hasStringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every(hasText);
+ const hasBoolean = (value: unknown): value is boolean => typeof value === 'boolean';
++const hasBilling = (value: unknown): boolean =>
++  value === undefined || value === 'payment' || value === 'subscription';
+ 
+ const validateLane = (lane: LaneConfig): void => {
+   const validations = [
+@@ -30,6 +32,7 @@ const validateLane = (lane: LaneConfig): void => {
+     hasNumberAtLeast(lane.max_input_chars, 1),
+     hasBoolean(lane.human_review_required),
+     hasBoolean(lane.enabled),
++    hasBilling(lane.billing),
+   ];
+ 
+   if (validations.some((valid) => !valid)) {
+@@ -47,6 +50,7 @@ const validateService = (service: ServiceConfig): void => {
+     hasText(service.deliverable_template),
+     hasStringArray(service.outputs),
+     hasBoolean(service.enabled),
++    hasBilling(service.billing),
+   ];
+ 
+   if (validations.some((valid) => !valid)) {
+diff --git a/src/revenue/types.ts b/src/revenue/types.ts
+index 7d77232..474f477 100644
+--- a/src/revenue/types.ts
++++ b/src/revenue/types.ts
+@@ -1,3 +1,5 @@
++export type BillingMode = 'payment' | 'subscription';
++
+ export interface LaneConfig {
+   slug: string;
+   name: string;
+@@ -8,6 +10,7 @@ export interface LaneConfig {
+   max_input_chars: number;
+   human_review_required: boolean;
+   enabled: boolean;
++  billing?: BillingMode;
+ }
+ 
+ export interface LaneCatalog {
+@@ -25,6 +28,7 @@ export interface ServiceConfig {
+   deliverable_template: string;
+   outputs: string[];
+   enabled: boolean;
++  billing?: BillingMode;
+ }
+ 
+ export interface ServiceCatalog {
+diff --git a/src/routes/revenue.ts b/src/routes/revenue.ts
+index 42b7601..6e565d3 100644
+--- a/src/routes/revenue.ts
++++ b/src/routes/revenue.ts
+@@ -2,9 +2,14 @@ import { Router, Request, Response } from 'express';
+ import { z } from 'zod';
+ 
+ import { listEnabledAgents } from '../agents/orchestrator';
+-import { createLaneCheckout, simulatePaymentCollection } from '../billing/checkout';
++import { createBillingPortalSession, createLaneCheckout, simulatePaymentCollection } from '../billing/checkout';
+ import { getEarningsSnapshot, getPayment, listPayments } from '../billing/ledger';
++import { listPublicOffers } from '../commerce/offers';
++import { listAuditEvents } from '../governance/auditLog';
+ import { requireOperatorAuth } from '../middleware/auth';
++import { listMeshAudit } from '../mesh/envelope';
++import { metricsSnapshot } from '../observability/metrics';
++import { intrusionSnapshot } from '../security/intrusion';
+ import { loadOpenClawConfig } from '../revenue/config';
+ import {
+   classifyPaidRequest,
+@@ -29,6 +34,11 @@ const checkoutSchema = paidRequestSchema.extend({
+   cancel_url: z.string().url().optional(),
+ });
+ 
++const billingPortalSchema = z.object({
++  customer_id: z.string().min(1),
++  return_url: z.string().url().optional(),
++});
++
+ const revenueRouter = Router();
+ revenueRouter.use('/sara-plus', saraPlusRouter);
+ 
+@@ -59,6 +69,10 @@ revenueRouter.get('/agents', (_req: Request, res: Response) => {
+   res.json({ agents: listEnabledAgents() });
+ });
+ 
++revenueRouter.get('/offers', (_req: Request, res: Response) => {
++  res.json({ offers: listPublicOffers() });
++});
++
+ revenueRouter.get('/openclaw', (_req: Request, res: Response) => {
+   res.json({ openclaw: loadOpenClawConfig() });
+ });
+@@ -98,6 +112,35 @@ revenueRouter.post('/checkout', async (req: Request, res: Response) => {
+ 
+ revenueRouter.use(requireOperatorAuth);
+ 
++revenueRouter.post('/billing-portal', async (req: Request, res: Response) => {
++  const parsed = billingPortalSchema.safeParse(req.body);
++  if (!parsed.success) {
++    res.status(400).json({ error: 'Invalid billing portal payload', details: parsed.error.flatten() });
++    return;
++  }
++
++  try {
++    const portal = await createBillingPortalSession(parsed.data);
++    res.status(201).json(portal);
++  } catch (err) {
++    const message = err instanceof Error ? err.message : 'Unknown billing portal error';
++    const status = message.includes('customer_id') ? 400 : 502;
++    res.status(status).json({ error: status === 400 ? message : 'Billing portal provider error' });
++  }
++});
++
++revenueRouter.get('/metrics', (_req: Request, res: Response) => {
++  res.json({ metrics: metricsSnapshot(), intrusion: intrusionSnapshot() });
++});
++
++revenueRouter.get('/audit', (_req: Request, res: Response) => {
++  res.json({ events: listAuditEvents() });
++});
++
++revenueRouter.get('/mesh', (_req: Request, res: Response) => {
++  res.json({ envelopes: listMeshAudit() });
++});
++
+ revenueRouter.get('/earnings', (_req: Request, res: Response) => {
+   res.json({ earnings: getEarningsSnapshot() });
+ });
+diff --git a/src/security/crypto.ts b/src/security/crypto.ts
+new file mode 100644
+index 0000000..55621a3
+--- /dev/null
++++ b/src/security/crypto.ts
+@@ -0,0 +1,69 @@
++import { createCipheriv, createDecipheriv, createHmac, hkdfSync, randomBytes, timingSafeEqual } from 'crypto';
++
++const PREFIX = 'enc:v1:';
++const INFO = 'openclaw-revenue-ledger-pii';
++const SALT = 'openclaw-revenue-engine';
++
++const encryptionKey = (): Buffer | null => {
++  const raw = process.env.OPENCLAW_ENCRYPTION_KEY?.trim();
++  if (!raw) {
++    if (process.env.NODE_ENV === 'production') {
++      throw new Error('OPENCLAW_ENCRYPTION_KEY is required in production to seal customer PII');
++    }
++    return null;
++  }
++  return Buffer.from(hkdfSync('sha256', raw, SALT, INFO, 32));
++};
++
++export function seal(plaintext?: string): string | undefined {
++  if (!plaintext) {
++    return plaintext;
++  }
++  const key = encryptionKey();
++  if (!key) {
++    return plaintext;
++  }
++  const iv = randomBytes(12);
++  const cipher = createCipheriv('aes-256-gcm', key, iv);
++  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
++  const tag = cipher.getAuthTag();
++  return `${PREFIX}${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`;
++}
++
++export function openSealed(value?: string): string | undefined {
++  if (!value || !value.startsWith(PREFIX)) {
++    return value;
++  }
++  const key = encryptionKey();
++  if (!key) {
++    return value;
++  }
++  const [, packed] = value.split(PREFIX);
++  const [ivB64, tagB64, dataB64] = packed.split('.');
++  if (!ivB64 || !tagB64 || !dataB64) {
++    throw new Error('Malformed sealed payload');
++  }
++  const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivB64, 'base64url'));
++  decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
++  return Buffer.concat([
++    decipher.update(Buffer.from(dataB64, 'base64url')),
++    decipher.final(),
++  ]).toString('utf8');
++}
++
++export function hmacSha256Hex(payload: string, secret: string): string {
++  return createHmac('sha256', secret).update(payload).digest('hex');
++}
++
++export function safeEqual(left: string, right: string): boolean {
++  const a = Buffer.from(left);
++  const b = Buffer.from(right);
++  if (a.length !== b.length) {
++    return false;
++  }
++  return timingSafeEqual(a, b);
++}
++
++export function encryptionEnabled(): boolean {
++  return Boolean(process.env.OPENCLAW_ENCRYPTION_KEY?.trim());
++}
+diff --git a/src/security/intrusion.ts b/src/security/intrusion.ts
+new file mode 100644
+index 0000000..fa9ac60
+--- /dev/null
++++ b/src/security/intrusion.ts
+@@ -0,0 +1,65 @@
++import { incMetric } from '../observability/metrics';
++import { recordAudit } from '../governance/auditLog';
++
++export type IntrusionSignal =
++  | 'webhook_signature_failure'
++  | 'charge_dispute'
++  | 'charge_refund'
++  | 'early_fraud_warning'
++  | 'webhook_burst';
++
++interface SignalWindow {
++  at: number;
++  signal: IntrusionSignal;
++}
++
++const windowMs = (): number => Number(process.env.INTRUSION_WINDOW_MS ?? 5 * 60_000);
++const signals: SignalWindow[] = [];
++
++const thresholds: Record<IntrusionSignal, number> = {
++  webhook_signature_failure: 8,
++  charge_dispute: 3,
++  charge_refund: 5,
++  early_fraud_warning: 1,
++  webhook_burst: 40,
++};
++
++export function resetIntrusion(): void {
++  signals.length = 0;
++}
++
++const prune = (now: number): void => {
++  const cutoff = now - windowMs();
++  while (signals.length && signals[0].at < cutoff) {
++    signals.shift();
++  }
++};
++
++export function noteIntrusion(signal: IntrusionSignal, details: Record<string, string> = {}): boolean {
++  const now = Date.now();
++  prune(now);
++  signals.push({ at: now, signal });
++  incMetric(`intrusion.${signal}`);
++
++  const count = signals.filter((item) => item.signal === signal).length;
++  const tripped = count >= thresholds[signal];
++  if (tripped) {
++    recordAudit({
++      actor: 'intrusion-detector',
++      action: 'threshold_exceeded',
++      resource: signal,
++      outcome: 'alert',
++      trace_id: details.trace_id ?? 'intrusion',
++      details: { ...details, count: String(count) },
++    });
++  }
++  return tripped;
++}
++
++export function intrusionSnapshot(): Record<string, number> {
++  prune(Date.now());
++  return signals.reduce<Record<string, number>>((acc, item) => {
++    acc[item.signal] = (acc[item.signal] ?? 0) + 1;
++    return acc;
++  }, {});
++}
+diff --git a/src/security/redact.ts b/src/security/redact.ts
+index 1a5efc8..7734e63 100644
+--- a/src/security/redact.ts
++++ b/src/security/redact.ts
+@@ -1,5 +1,6 @@
+ const SECRET_PATTERNS: RegExp[] = [
+   /\bsk_(?:live|test)_[A-Za-z0-9]+/g,
++  /\brk_(?:live|test)_[A-Za-z0-9]+/g,
+   /\bwhsec_[A-Za-z0-9]+/g,
+   /\bpk_(?:live|test)_[A-Za-z0-9]+/g,
+   /\bgh[pousr]_[A-Za-z0-9]+/g,
+diff --git a/src/webhooks/stripe.webhook.ts b/src/webhooks/stripe.webhook.ts
+index 727608e..3b1d0c8 100644
+--- a/src/webhooks/stripe.webhook.ts
++++ b/src/webhooks/stripe.webhook.ts
+@@ -3,18 +3,26 @@ import Stripe from 'stripe';
+ 
+ import { requireEnv } from '../lib/env';
+ import {
++  findPaymentByMetadataId,
++  findPaymentByStripeInvoice,
++  findPaymentByStripePaymentIntent,
+   findPaymentByStripeSession,
++  findPaymentByStripeSubscription,
+   getPayment,
+   markPaymentStatus,
+   recordInvoicePayment,
+   rememberStripeEvent,
+ } from '../billing/ledger';
++import { getStripe, resolveStripeKey } from '../billing/stripeClient';
++import { PaymentRecord, PaymentStatus } from '../billing/types';
++import { recordAudit } from '../governance/auditLog';
++import { incMetric } from '../observability/metrics';
++import { runBillingFulfillmentDag } from '../orchestration/billingDag';
+ import { redactSecrets } from '../security/redact';
++import { noteIntrusion } from '../security/intrusion';
++import { syncMerchantSubscription } from '../services/merchant.service';
+ 
+-const stripe = new Stripe(requireEnv('STRIPE_SECRET_KEY'), {
+-  apiVersion: '2024-06-20',
+-});
+-
++resolveStripeKey();
+ const webhookSecret = requireEnv('STRIPE_WEBHOOK_SECRET');
+ 
+ /**
+@@ -25,31 +33,8 @@ const webhookSecret = requireEnv('STRIPE_WEBHOOK_SECRET');
+  *
+  * IMPORTANT: This handler must be registered with express.raw({ type: 'application/json' })
+  * in index.ts BEFORE the global express.json() middleware.
+- *
+- * Supported events:
+- *   - customer.subscription.created
+- *   - customer.subscription.updated
+- *   - customer.subscription.deleted
+- *   - invoice.payment_succeeded
+- *   - invoice.payment_failed
+- *   - checkout.session.completed
+- *
+- * Fix for @typescript-eslint/require-await (line 36):
+- * stripe.webhooks.constructEvent() is synchronous — it returns Stripe.Event
+- * directly, not a Promise. No await expressions exist in this function.
+- * Removed the async keyword; the return type changes from Promise<void> to void.
+- *
+- * Fix for @typescript-eslint/no-unnecessary-type-assertion (lines 65–80):
+- * Stripe's SDK now ships precise generic types for event.data.object keyed by
+- * event.type via the Stripe.DiscriminatedEvent union. In the switch branches,
+- * TypeScript already narrows event to the correct discriminated type, so
+- * casting event.data.object with `as Stripe.Subscription` etc. is redundant.
+- * Replaced each cast with a typed const that reads from the pre-narrowed event.
+  */
+-export function stripeWebhookHandler(
+-  req: Request,
+-  res: Response
+-): void {
++export function stripeWebhookHandler(req: Request, res: Response): void {
+   const sig = req.headers['stripe-signature'];
+   if (!sig) {
+     res.status(400).json({ error: 'Missing stripe-signature header' });
+@@ -58,14 +43,12 @@ export function stripeWebhookHandler(
+ 
+   let event: Stripe.Event;
+   try {
+-    event = stripe.webhooks.constructEvent(
+-      req.body as Buffer,
+-      sig,
+-      webhookSecret
+-    );
++    event = getStripe().webhooks.constructEvent(req.body as Buffer, sig, webhookSecret);
+   } catch (err) {
+     const message = err instanceof Error ? err.message : 'Unknown error';
+     console.error(`Stripe webhook signature verification failed: ${redactSecrets(message)}`);
++    noteIntrusion('webhook_signature_failure', { reason: 'signature' });
++    incMetric('stripe.webhook.signature_failed');
+     res.status(400).json({ error: `Webhook signature verification failed: ${message}` });
+     return;
+   }
+@@ -78,25 +61,42 @@ export function stripeWebhookHandler(
+   console.log(`Stripe webhook received: ${event.type} [${event.id}]`);
+ 
+   try {
+-    // Using Stripe.DiscriminatedEvent narrowing — no redundant type assertions needed.
++    incMetric('stripe.webhook.received');
++    noteIntrusion('webhook_burst', { event_type: event.type, trace_id: event.id });
+     switch (event.type) {
+       case 'customer.subscription.created':
+-        handleSubscriptionCreated(event.data.object);
++        handleSubscriptionCreated(event.data.object, event.id);
+         break;
+       case 'customer.subscription.updated':
+-        handleSubscriptionUpdated(event.data.object);
++        handleSubscriptionUpdated(event.data.object, event.id);
+         break;
+       case 'customer.subscription.deleted':
+-        handleSubscriptionDeleted(event.data.object);
++        handleSubscriptionDeleted(event.data.object, event.id);
+         break;
++      case 'invoice.paid':
+       case 'invoice.payment_succeeded':
+-        handlePaymentSucceeded(event.data.object);
++        handlePaymentSucceeded(event.data.object, event.id, event.type);
+         break;
+       case 'invoice.payment_failed':
+-        handlePaymentFailed(event.data.object);
++        handlePaymentFailed(event.data.object, event.id);
+         break;
+       case 'checkout.session.completed':
+-        handleCheckoutCompleted(event.data.object);
++        handleCheckoutCompleted(event.data.object, event.id);
++        break;
++      case 'checkout.session.async_payment_succeeded':
++        handleCheckoutAsyncSucceeded(event.data.object, event.id);
++        break;
++      case 'checkout.session.async_payment_failed':
++        handleCheckoutAsyncFailed(event.data.object, event.id);
++        break;
++      case 'charge.dispute.created':
++        handleDisputeCreated(event.data.object, event.id);
++        break;
++      case 'charge.refunded':
++        handleChargeRefunded(event.data.object, event.id);
++        break;
++      case 'radar.early_fraud_warning.created':
++        handleEarlyFraudWarning(event.data.object, event.id);
+         break;
+       default:
+         console.log(`Unhandled Stripe event type: ${event.type}`);
+@@ -109,72 +109,290 @@ export function stripeWebhookHandler(
+   }
+ }
+ 
+-// ---------------------------------------------------------------------------
+-// Event Handlers
+-// ---------------------------------------------------------------------------
++function stringId(value: unknown): string | undefined {
++  if (typeof value === 'string' && value.length > 0) return value;
++  if (value && typeof value === 'object' && 'id' in value && typeof value.id === 'string') {
++    return value.id;
++  }
++  return undefined;
++}
++
++function subscriptionIdFromInvoice(invoice: Stripe.Invoice): string | undefined {
++  return stringId(invoice.parent?.subscription_details?.subscription);
++}
++
++function resolvePayment(input: {
++  paymentId?: string | null;
++  sessionId?: string | null;
++  invoiceId?: string | null;
++  paymentIntentId?: string | null;
++  subscriptionId?: string | null;
++}): PaymentRecord | undefined {
++  return (
++    findPaymentByMetadataId(input.paymentId) ??
++    (input.sessionId ? findPaymentByStripeSession(input.sessionId) : undefined) ??
++    (input.invoiceId ? findPaymentByStripeInvoice(input.invoiceId) : undefined) ??
++    (input.paymentIntentId ? findPaymentByStripePaymentIntent(input.paymentIntentId) : undefined) ??
++    (input.subscriptionId ? findPaymentByStripeSubscription(input.subscriptionId) : undefined)
++  );
++}
++
++function applyCheckoutSession(
++  session: Stripe.Checkout.Session,
++  status: PaymentStatus,
++): PaymentRecord | undefined {
++  const paymentId = session.metadata?.payment_id ?? session.client_reference_id;
++  const existing =
++    (paymentId ? getPayment(paymentId) : undefined) ?? findPaymentByStripeSession(session.id);
++  if (!existing) {
++    return undefined;
++  }
++  return markPaymentStatus(existing.id, status, {
++    stripe_session_id: session.id,
++    stripe_payment_intent_id: stringId(session.payment_intent),
++    stripe_subscription_id: stringId(session.subscription),
++    stripe_customer_id: stringId(session.customer),
++    amount_cents: session.amount_total ?? existing.amount_cents,
++    currency: session.currency ?? existing.currency,
++    metadata: {
++      payment_status: session.payment_status,
++      checkout_mode: session.mode ?? existing.metadata.billing ?? 'payment',
++    },
++  });
++}
+ 
+-function handleSubscriptionCreated(subscription: Stripe.Subscription): void {
++function handleSubscriptionCreated(subscription: Stripe.Subscription, eventId: string): void {
+   console.log(`New subscription created: ${subscription.id}`);
+   console.log(`Customer: ${String(subscription.customer)}`);
+   console.log(`Status: ${subscription.status}`);
+-  // TODO: Provision access, update DB, send welcome email
++  persistSubscription(subscription, eventId, 'customer.subscription.created');
+ }
+ 
+-function handleSubscriptionUpdated(subscription: Stripe.Subscription): void {
++function handleSubscriptionUpdated(subscription: Stripe.Subscription, eventId: string): void {
+   console.log(`Subscription updated: ${subscription.id}`);
+   console.log(`New status: ${subscription.status}`);
+-  // TODO: Update access level, sync plan changes to DB
++  persistSubscription(subscription, eventId, 'customer.subscription.updated');
+ }
+ 
+-function handleSubscriptionDeleted(subscription: Stripe.Subscription): void {
++function handleSubscriptionDeleted(subscription: Stripe.Subscription, eventId: string): void {
+   console.log(`Subscription cancelled: ${subscription.id}`);
+   console.log(`Customer: ${String(subscription.customer)}`);
+-  // TODO: Revoke access, update DB, send cancellation confirmation
++  persistSubscription(subscription, eventId, 'customer.subscription.deleted', 'canceled');
+ }
+ 
+-function handlePaymentSucceeded(invoice: Stripe.Invoice): void {
++function subscriptionPaymentStatus(status: Stripe.Subscription.Status): PaymentStatus {
++  if (status === 'active' || status === 'trialing') return 'paid';
++  if (status === 'canceled' || status === 'incomplete_expired') return 'canceled';
++  if (status === 'past_due' || status === 'unpaid' || status === 'incomplete') return 'failed';
++  return 'pending';
++}
++
++function afterMutation(
++  payment: PaymentRecord | undefined,
++  eventType: string,
++  eventId: string,
++  outcome: PaymentRecord['status'],
++): void {
++  incMetric(`stripe.event.${eventType}`);
++  if (!payment) {
++    return;
++  }
++  recordAudit({
++    actor: 'stripe-webhook',
++    action: eventType,
++    resource: payment.id,
++    outcome,
++    trace_id: eventId,
++    details: { lane: payment.lane, service: payment.service },
++  });
++  if (outcome === 'paid' || outcome === 'failed' || outcome === 'canceled') {
++    void runBillingFulfillmentDag({
++      payment,
++      eventType,
++      eventId,
++      outcome,
++    });
++  }
++}
++
++function persistSubscription(
++  subscription: Stripe.Subscription,
++  eventId: string,
++  eventType: string,
++  overrideStatus?: PaymentStatus,
++): void {
++  const payment = resolvePayment({
++    paymentId: subscription.metadata?.payment_id,
++    subscriptionId: subscription.id,
++  });
++  let updated: PaymentRecord | undefined;
++  if (payment && (payment.metadata.billing === 'subscription' || payment.stripe_subscription_id || subscription.metadata?.billing === 'subscription')) {
++    updated = markPaymentStatus(payment.id, overrideStatus ?? subscriptionPaymentStatus(subscription.status), {
++      stripe_subscription_id: subscription.id,
++      stripe_customer_id: stringId(subscription.customer),
++      metadata: { subscription_status: subscription.status },
++    });
++  }
++  afterMutation(updated, eventType, eventId, updated?.status ?? overrideStatus ?? 'pending');
++
++  void syncMerchantSubscription({
++    customerId: stringId(subscription.customer),
++    subscriptionId: subscription.id,
++    status: subscription.status,
++    tier: subscription.metadata?.service,
++  }).catch((err: unknown) => {
++    const message = err instanceof Error ? err.message : 'Unknown error';
++    console.error(`Failed to sync merchant subscription ${subscription.id}: ${redactSecrets(message)}`);
++  });
++}
++
++function handlePaymentSucceeded(invoice: Stripe.Invoice, eventId: string, eventType: string): void {
+   console.log(`Payment succeeded for invoice: ${invoice.id ?? 'unknown'}`);
+   console.log(`Amount: ${invoice.amount_paid} ${invoice.currency}`);
+   console.log(`Customer: ${String(invoice.customer)}`);
+-  if (invoice.id) {
+-    recordInvoicePayment({
+-      stripe_invoice_id: invoice.id,
+-      amount_cents: invoice.amount_paid,
+-      currency: invoice.currency,
+-      customer_id: String(invoice.customer),
+-      status: 'paid',
+-    });
++  if (!invoice.id) {
++    return;
+   }
++  const existing = resolvePayment({
++    paymentId: invoice.metadata?.payment_id ?? invoice.parent?.subscription_details?.metadata?.payment_id,
++    invoiceId: invoice.id,
++    subscriptionId: subscriptionIdFromInvoice(invoice),
++  });
++  const updated = existing
++    ? markPaymentStatus(existing.id, 'paid', {
++        stripe_invoice_id: invoice.id,
++        stripe_subscription_id: subscriptionIdFromInvoice(invoice),
++        stripe_customer_id: stringId(invoice.customer),
++        amount_cents: invoice.amount_paid,
++        currency: invoice.currency,
++      })
++    : recordInvoicePayment({
++        stripe_invoice_id: invoice.id,
++        amount_cents: invoice.amount_paid,
++        currency: invoice.currency,
++        customer_id: stringId(invoice.customer),
++        status: 'paid',
++      });
++  afterMutation(updated, eventType, eventId, 'paid');
+ }
+ 
+-function handlePaymentFailed(invoice: Stripe.Invoice): void {
++function handlePaymentFailed(invoice: Stripe.Invoice, eventId: string): void {
+   console.log(`Payment failed for invoice: ${invoice.id ?? 'unknown'}`);
+   console.log(`Customer: ${String(invoice.customer)}`);
+   console.log(`Next retry: ${invoice.next_payment_attempt ?? 'none'}`);
+-  if (invoice.id) {
+-    recordInvoicePayment({
+-      stripe_invoice_id: invoice.id,
+-      amount_cents: invoice.amount_due ?? 0,
+-      currency: invoice.currency ?? 'usd',
+-      customer_id: String(invoice.customer),
+-      status: 'failed',
+-    });
++  if (!invoice.id) {
++    return;
+   }
++  const existing = resolvePayment({
++    paymentId: invoice.metadata?.payment_id ?? invoice.parent?.subscription_details?.metadata?.payment_id,
++    invoiceId: invoice.id,
++    subscriptionId: subscriptionIdFromInvoice(invoice),
++  });
++  const updated = existing
++    ? markPaymentStatus(existing.id, 'failed', {
++        stripe_invoice_id: invoice.id,
++        stripe_subscription_id: subscriptionIdFromInvoice(invoice),
++        stripe_customer_id: stringId(invoice.customer),
++        amount_cents: invoice.amount_due ?? existing.amount_cents,
++        currency: invoice.currency ?? existing.currency,
++      })
++    : recordInvoicePayment({
++        stripe_invoice_id: invoice.id,
++        amount_cents: invoice.amount_due ?? 0,
++        currency: invoice.currency ?? 'usd',
++        customer_id: stringId(invoice.customer),
++        status: 'failed',
++      });
++  afterMutation(updated, 'invoice.payment_failed', eventId, 'failed');
+ }
+ 
+-function handleCheckoutCompleted(session: Stripe.Checkout.Session): void {
++function handleCheckoutCompleted(session: Stripe.Checkout.Session, eventId: string): void {
+   console.log(`Checkout session completed: ${session.id}`);
+   console.log(`Customer: ${String(session.customer)}`);
+   console.log(`Payment status: ${session.payment_status}`);
+-  const paymentId = session.metadata?.payment_id;
+-  const existing = (paymentId ? getPayment(paymentId) : undefined) ?? findPaymentByStripeSession(session.id);
+-  if (!existing) {
++  if (session.payment_status === 'unpaid') {
++    incMetric('stripe.checkout.unpaid_skipped');
++    const existing =
++      findPaymentByMetadataId(session.metadata?.payment_id ?? session.client_reference_id) ??
++      findPaymentByStripeSession(session.id);
++    if (existing) {
++      const updated = markPaymentStatus(existing.id, 'pending', {
++        stripe_session_id: session.id,
++        stripe_payment_intent_id: stringId(session.payment_intent),
++        stripe_subscription_id: stringId(session.subscription),
++        stripe_customer_id: stringId(session.customer),
++        metadata: { payment_status: session.payment_status },
++      });
++      afterMutation(updated, 'checkout.session.completed', eventId, 'pending');
++    }
+     return;
+   }
+-  markPaymentStatus(existing.id, session.payment_status === 'paid' ? 'paid' : 'pending', {
+-    stripe_session_id: session.id,
+-    stripe_payment_intent_id: typeof session.payment_intent === 'string' ? session.payment_intent : undefined,
+-    amount_cents: session.amount_total ?? existing.amount_cents,
+-    currency: session.currency ?? existing.currency,
++  const updated = applyCheckoutSession(session, session.payment_status === 'paid' ? 'paid' : 'pending');
++  afterMutation(updated, 'checkout.session.completed', eventId, updated?.status ?? 'pending');
++}
++
++function handleCheckoutAsyncSucceeded(session: Stripe.Checkout.Session, eventId: string): void {
++  console.log(`Checkout async payment succeeded: ${session.id}`);
++  const updated = applyCheckoutSession(session, 'paid');
++  afterMutation(updated, 'checkout.session.async_payment_succeeded', eventId, 'paid');
++}
++
++function handleCheckoutAsyncFailed(session: Stripe.Checkout.Session, eventId: string): void {
++  console.log(`Checkout async payment failed: ${session.id}`);
++  const updated = applyCheckoutSession(session, 'failed');
++  afterMutation(updated, 'checkout.session.async_payment_failed', eventId, 'failed');
++}
++
++function handleDisputeCreated(dispute: Stripe.Dispute, eventId: string): void {
++  console.log(`Charge dispute created: ${dispute.id}`);
++  noteIntrusion('charge_dispute', { dispute_id: dispute.id, trace_id: eventId });
++  const payment = resolvePayment({
++    paymentId: dispute.metadata?.payment_id,
++    paymentIntentId: stringId(dispute.payment_intent),
++  });
++  if (!payment) {
++    return;
++  }
++  const updated = markPaymentStatus(payment.id, 'failed', {
++    stripe_payment_intent_id: stringId(dispute.payment_intent) ?? payment.stripe_payment_intent_id,
++    metadata: { risk_event: 'charge.dispute.created', dispute_id: dispute.id },
++  });
++  afterMutation(updated, 'charge.dispute.created', eventId, 'failed');
++}
++
++function handleChargeRefunded(charge: Stripe.Charge, eventId: string): void {
++  console.log(`Charge refunded: ${charge.id}`);
++  noteIntrusion('charge_refund', { charge_id: charge.id, trace_id: eventId });
++  const payment = resolvePayment({
++    paymentId: charge.metadata?.payment_id,
++    paymentIntentId: stringId(charge.payment_intent),
++  });
++  if (!payment) {
++    return;
++  }
++  const updated = markPaymentStatus(payment.id, 'failed', {
++    stripe_payment_intent_id: stringId(charge.payment_intent) ?? payment.stripe_payment_intent_id,
++    metadata: { risk_event: 'charge.refunded', charge_id: charge.id },
++  });
++  afterMutation(updated, 'charge.refunded', eventId, 'failed');
++}
++
++function handleEarlyFraudWarning(warning: Stripe.Radar.EarlyFraudWarning, eventId: string): void {
++  console.log(`Radar early fraud warning: ${warning.id}`);
++  noteIntrusion('early_fraud_warning', { warning_id: warning.id, trace_id: eventId });
++  const payment = resolvePayment({
++    paymentIntentId: stringId(warning.payment_intent),
++  });
++  if (!payment) {
++    return;
++  }
++  const updated = markPaymentStatus(payment.id, 'failed', {
++    stripe_payment_intent_id: stringId(warning.payment_intent) ?? payment.stripe_payment_intent_id,
++    metadata: {
++      risk_event: 'radar.early_fraud_warning.created',
++      fraud_warning_id: warning.id,
++      fraud_type: warning.fraud_type,
++    },
+   });
++  afterMutation(updated, 'radar.early_fraud_warning.created', eventId, 'failed');
+ }
+diff --git a/tests/unit/collection.branches.test.ts b/tests/unit/collection.branches.test.ts
+index 29592d2..0c907f5 100644
+--- a/tests/unit/collection.branches.test.ts
++++ b/tests/unit/collection.branches.test.ts
+@@ -71,6 +71,11 @@ describe('live Stripe checkout and error branches', () => {
+     expect(result.checkout_url).toContain('checkout.stripe.com');
+     expect(findPaymentByStripeSession('cs_live_1')?.id).toBe(result.payment.id);
+     expect(mockCreateSession).toHaveBeenCalled();
++    const [params, options] = mockCreateSession.mock.calls[0] as [Record<string, unknown>, Record<string, unknown>];
++    expect(params).not.toHaveProperty('payment_method_types');
++    expect(params.mode).toBe('payment');
++    expect(params.integration_identifier).toEqual(expect.stringMatching(/^openclaw-[a-z]{8}$/));
++    expect(options).toEqual({ idempotencyKey: result.payment.id });
+   });
+ 
+   it('rejects checkout requests without a customer email', async () => {
+diff --git a/tests/unit/platform.controls.test.ts b/tests/unit/platform.controls.test.ts
+new file mode 100644
+index 0000000..b594651
+--- /dev/null
++++ b/tests/unit/platform.controls.test.ts
+@@ -0,0 +1,142 @@
++import { createPayment, getPayment, resetLedger } from '../../src/billing/ledger';
++import { listPublicOffers } from '../../src/commerce/offers';
++import { recordAudit, listAuditEvents } from '../../src/governance/auditLog';
++import { createEnvelope, publish, listMeshAudit, subscribe } from '../../src/mesh/envelope';
++import { incMetric, metricsSnapshot } from '../../src/observability/metrics';
++import { readinessReport } from '../../src/observability/readiness';
++import { DAG } from '../../src/orchestration/dag';
++import { runBillingFulfillmentDag } from '../../src/orchestration/billingDag';
++import { hmacSha256Hex, openSealed, safeEqual, seal } from '../../src/security/crypto';
++import { noteIntrusion, intrusionSnapshot } from '../../src/security/intrusion';
++import { redactSecrets } from '../../src/security/redact';
++
++describe('cryptography', () => {
++  const originalKey = process.env.OPENCLAW_ENCRYPTION_KEY;
++
++  afterEach(() => {
++    process.env.OPENCLAW_ENCRYPTION_KEY = originalKey;
++    resetLedger();
++  });
++
++  it('seals and opens PII with AES-256-GCM', () => {
++    process.env.OPENCLAW_ENCRYPTION_KEY = 'unit-test-encryption-passphrase';
++    const sealed = seal('buyer@example.com');
++    expect(sealed).toMatch(/^enc:v1:/);
++    expect(openSealed(sealed)).toBe('buyer@example.com');
++  });
++
++  it('returns decrypted emails from the ledger', () => {
++    process.env.OPENCLAW_ENCRYPTION_KEY = 'unit-test-encryption-passphrase';
++    const payment = createPayment({
++      lane: 'small-request',
++      service: 'repo-triage',
++      amount_cents: 1900,
++      currency: 'usd',
++      customer_email: 'buyer@example.com',
++      simulated: true,
++    });
++    expect(getPayment(payment.id)?.customer_email).toBe('buyer@example.com');
++  });
++
++  it('compares secrets in constant time and redacts RAKs', () => {
++    expect(safeEqual('abc', 'abc')).toBe(true);
++    expect(safeEqual('abc', 'abd')).toBe(false);
++    expect(hmacSha256Hex('payload', 'secret')).toHaveLength(64);
++    expect(redactSecrets('rk_test_abc123XYZ')).toBe('[REDACTED]');
++  });
++});
++
++describe('async DAG', () => {
++  it('skips downstream nodes when an upstream node fails', async () => {
++    const dag = new DAG('test');
++    dag.addNode('ok', () => 1);
++    dag.addNode('boom', () => {
++      throw new Error('fail');
++    });
++    dag.addNode('child', () => 'should skip', ['boom']);
++    const result = await dag.run();
++    expect(result.status).toBe('error');
++    expect(result.nodes.child.status).toBe('skipped');
++  });
++
++  it('rejects cycles', async () => {
++    const dag = new DAG('cycle');
++    dag.addNode('a', () => 1, ['b']);
++    dag.addNode('b', () => 1, ['a']);
++    await expect(dag.run()).rejects.toThrow(/cycle/);
++  });
++});
++
++describe('governance, mesh, observability, intrusion, sales', () => {
++  beforeEach(() => resetLedger());
++
++  it('records audit events and metrics', () => {
++    recordAudit({
++      actor: 'test',
++      action: 'checkout.create',
++      resource: 'pay_1',
++      outcome: 'ok',
++      trace_id: 'tr_1',
++      details: { lane: 'small-request' },
++    });
++    incMetric('checkout.payment');
++    expect(listAuditEvents()[0]?.action).toBe('checkout.create');
++    expect(metricsSnapshot()['checkout.payment']?.count).toBe(1);
++  });
++
++  it('publishes A2A envelopes on the mesh bus', async () => {
++    subscribe('pipefish.control-plane', (envelope) => ({
++      ...envelope,
++      source: 'pipefish.control-plane',
++      target: envelope.source,
++      intent: 'ack',
++    }));
++    const envelope = createEnvelope({
++      source: 'openclaw-revenue-engine',
++      target: 'pipefish.control-plane',
++      intent: 'commerce.recognize',
++      payload: { sku: 'mesh.retain.ops' },
++    });
++    const replies = await publish(envelope);
++    expect(replies[0]?.intent).toBe('ack');
++    expect(listMeshAudit()[0]?.tokens).toEqual(['commerce:write']);
++  });
++
++  it('runs the billing fulfillment DAG', async () => {
++    const payment = createPayment({
++      lane: 'gitops-retainer',
++      service: 'gitops-retainer',
++      amount_cents: 800000,
++      currency: 'usd',
++      simulated: false,
++    });
++    const result = await runBillingFulfillmentDag({
++      payment,
++      eventType: 'checkout.session.async_payment_succeeded',
++      eventId: 'evt_test',
++      outcome: 'paid',
++    });
++    expect(result.status).toBe('ok');
++    expect(result.nodes.emit_mesh.status).toBe('ok');
++    expect(listMeshAudit()[0]?.payload).toMatchObject({ sku: 'mesh.retain.ops' });
++  });
++
++  it('flags Radar-style fraud signals', () => {
++    expect(noteIntrusion('early_fraud_warning', { trace_id: 'evt_1' })).toBe(true);
++    expect(intrusionSnapshot().early_fraud_warning).toBe(1);
++  });
++
++  it('lists the GitOps retainer as a subscription offer', () => {
++    const retainer = listPublicOffers().find((offer) => offer.slug === 'gitops-retainer');
++    expect(retainer).toMatchObject({
++      price: 8000,
++      billing: 'subscription',
++    });
++  });
++
++  it('reports Stripe API version on readiness', () => {
++    const report = readinessReport();
++    expect(report.stripe.api_version).toBe('2026-09-30.endive');
++    expect(['ok', 'degraded']).toContain(report.status);
++  });
++});
+diff --git a/tests/unit/revenue.collection.routes.test.ts b/tests/unit/revenue.collection.routes.test.ts
+index 2b42b68..37ddfb3 100644
+--- a/tests/unit/revenue.collection.routes.test.ts
++++ b/tests/unit/revenue.collection.routes.test.ts
+@@ -51,6 +51,36 @@ describe('money collection routes', () => {
+     expect(res.status).toBe(400);
+   });
+ 
++  it('exposes operator metrics and audit after checkout', async () => {
++    await request(app).post('/revenue/checkout').send({
++      title: 'Repository triage',
++      body: 'Please review my GitHub portfolio repository and README.',
++      customer_email: 'buyer@example.com',
++    });
++
++    const metrics = await request(app).get('/revenue/metrics').set(operatorAuthHeaders());
++    const audit = await request(app).get('/revenue/audit').set(operatorAuthHeaders());
++    const ready = await request(app).get('/ready');
++
++    expect(metrics.status).toBe(200);
++    expect(metrics.body.metrics['checkout.payment']?.count).toBeGreaterThanOrEqual(1);
++    expect(audit.status).toBe(200);
++    expect(audit.body.events[0]?.action).toBe('checkout.create');
++    expect(ready.status).toBe(200);
++    expect(ready.body.stripe.api_version).toBe('2026-09-30.endive');
++  });
++
++  it('opens a simulated billing portal for operators', async () => {
++    const res = await request(app)
++      .post('/revenue/billing-portal')
++      .set(operatorAuthHeaders())
++      .send({ customer_id: 'cus_sim_1' });
++
++    expect(res.status).toBe(201);
++    expect(res.body.simulated).toBe(true);
++    expect(res.body.url).toContain('cus_sim_1');
++  });
++
+   it('lists agents and MCP tools', async () => {
+     const agents = await request(app).get('/revenue/agents');
+     const tools = await request(app).get('/mcp/tools');
+diff --git a/tests/unit/revenue.routes.test.ts b/tests/unit/revenue.routes.test.ts
+index a21558a..a416008 100644
+--- a/tests/unit/revenue.routes.test.ts
++++ b/tests/unit/revenue.routes.test.ts
+@@ -15,12 +15,22 @@ describe('revenue routes', () => {
+     expect(res.status).toBe(200);
+     expect(res.body.summary).toMatchObject({
+       currency: 'USD',
+-      enabled_lanes: 3,
+-      enabled_services: 6,
++      enabled_lanes: 4,
++      enabled_services: 7,
+       default_lane: 'detailed-request',
+     });
+   });
+ 
++  it('lists public sales offers including the GitOps retainer', async () => {
++    const res = await request(app).get('/revenue/offers');
++    expect(res.status).toBe(200);
++    expect(res.body.offers).toEqual(
++      expect.arrayContaining([
++        expect.objectContaining({ slug: 'gitops-retainer', billing: 'subscription', price: 8000 }),
++      ]),
++    );
++  });
++
+   it('lists lanes and services', async () => {
+     const lanes = await request(app).get('/revenue/lanes');
+     const services = await request(app).get('/revenue/services');
+diff --git a/tests/unit/revenue.service.test.ts b/tests/unit/revenue.service.test.ts
+index a128e28..73774b0 100644
+--- a/tests/unit/revenue.service.test.ts
++++ b/tests/unit/revenue.service.test.ts
+@@ -4,7 +4,7 @@ describe('revenue service catalog', () => {
+   it('loads editable Moltgate offer lane defaults', () => {
+     const lanes = listRevenueLanes();
+     expect(lanes.map((lane) => lane.slug)).toEqual(
+-      expect.arrayContaining(['small-request', 'detailed-request', 'real-offer']),
++      expect.arrayContaining(['small-request', 'detailed-request', 'real-offer', 'gitops-retainer']),
+     );
+     expect(lanes.find((lane) => lane.slug === 'small-request')).toMatchObject({
+       price: 19,
+@@ -17,7 +17,7 @@ describe('revenue service catalog', () => {
+   it('loads service catalog defaults', () => {
+     const services = listRevenueServices();
+     expect(services.map((service) => service.slug)).toEqual(
+-      expect.arrayContaining(['repo-triage', 'actions-debug', 'devsecops-hardening', 'openclaw-setup', 'ai-roadmap', 'sara-plus-touchless']),
++      expect.arrayContaining(['repo-triage', 'actions-debug', 'devsecops-hardening', 'openclaw-setup', 'ai-roadmap', 'sara-plus-touchless', 'gitops-retainer']),
+     );
+   });
+ 
+@@ -25,13 +25,13 @@ describe('revenue service catalog', () => {
+     const summary = getRevenueSummary();
+     expect(summary).toMatchObject({
+       currency: 'USD',
+-      enabled_lanes: 3,
+-      enabled_services: 6,
++      enabled_lanes: 4,
++      enabled_services: 7,
+       default_lane: 'detailed-request',
+       default_service: 'repo-triage',
+     });
+     expect(summary.min_price).toBe(19);
+-    expect(summary.max_price).toBe(49);
++    expect(summary.max_price).toBe(8000);
+   });
+ 
+   it('classifies CI workflow requests into the actions debug service', () => {
+@@ -82,4 +82,17 @@ describe('revenue service catalog', () => {
+   it('rejects empty paid request bodies', () => {
+     expect(() => classifyPaidRequest({ body: '   ' })).toThrow('Paid request body is required');
+   });
++
++  it('classifies GitOps retainer requests as a monthly subscription', () => {
++    const classification = classifyPaidRequest({
++      title: 'AgentOps retainer',
++      body: 'We need a monthly GitOps retainer for control plane and agentops coverage.',
++    });
++
++    expect(classification.service.slug).toBe('gitops-retainer');
++    expect(classification.lane.slug).toBe('gitops-retainer');
++    expect(classification.estimated_revenue).toBe(8000);
++    expect(classification.service.billing).toBe('subscription');
++    expect(classification.lane.billing).toBe('subscription');
++  });
+ });
+diff --git a/tests/unit/saraPlus.test.ts b/tests/unit/saraPlus.test.ts
+index 8850311..3c951f6 100644
+--- a/tests/unit/saraPlus.test.ts
++++ b/tests/unit/saraPlus.test.ts
+@@ -30,7 +30,7 @@ describe('SARA Plus touchless catalog', () => {
+     expect(listRevenueServices().map((service) => service.slug)).toEqual(
+       expect.arrayContaining(['sara-plus-touchless']),
+     );
+-    expect(getRevenueSummary().enabled_services).toBe(6);
++    expect(getRevenueSummary().enabled_services).toBe(7);
+ 
+     const classification = classifyPaidRequest({
+       title: 'SARA Plus touchless AT&T mobile',
+diff --git a/tests/unit/stripe.checkout.test.ts b/tests/unit/stripe.checkout.test.ts
+new file mode 100644
+index 0000000..99dbac4
+--- /dev/null
++++ b/tests/unit/stripe.checkout.test.ts
+@@ -0,0 +1,132 @@
++import { createBillingPortalSession, createLaneCheckout } from '../../src/billing/checkout';
++import { resetLedger } from '../../src/billing/ledger';
++import { resetStripeClient } from '../../src/billing/stripeClient';
++
++const mockCreateSession = jest.fn();
++const mockCreatePortal = jest.fn();
++
++jest.mock('stripe', () =>
++  jest.fn().mockImplementation(() => ({
++    checkout: {
++      sessions: {
++        create: (...args: unknown[]) => mockCreateSession(...args),
++      },
++    },
++    billingPortal: {
++      sessions: {
++        create: (...args: unknown[]) => mockCreatePortal(...args),
++      },
++    },
++    webhooks: { constructEvent: jest.fn() },
++  })),
++);
++
++describe('Stripe Checkout Sessions', () => {
++  beforeEach(() => {
++    resetLedger();
++    resetStripeClient();
++    mockCreateSession.mockReset();
++    mockCreatePortal.mockReset();
++    process.env.STRIPE_MODE = 'live';
++    process.env.NODE_ENV = 'test';
++    process.env.STRIPE_RESTRICTED_KEY = 'rk_test_checkout_key_123456';
++    delete process.env.STRIPE_PRICE_RETAINER;
++    delete process.env.STRIPE_TAX_REGISTRATION_ACTIVE;
++  });
++
++  afterEach(() => {
++    process.env.STRIPE_MODE = 'simulated';
++    process.env.NODE_ENV = 'test';
++  });
++
++  it('omits payment_method_types and sets an openclaw integration_identifier', async () => {
++    mockCreateSession.mockResolvedValueOnce({
++      id: 'cs_live_payment',
++      url: 'https://checkout.stripe.com/c/pay/cs_live_payment',
++    });
++
++    const result = await createLaneCheckout({
++      body: 'Please review my GitHub portfolio repository and README.',
++      customer_email: 'buyer@example.com',
++    });
++
++    const [params, options] = mockCreateSession.mock.calls[0] as [Record<string, unknown>, Record<string, unknown>];
++    expect(params).not.toHaveProperty('payment_method_types');
++    expect(params.mode).toBe('payment');
++    expect(params.integration_identifier).toEqual(expect.stringMatching(/^openclaw-[a-z]{8}$/));
++    expect(params.automatic_tax).toBeUndefined();
++    expect(options).toEqual({ idempotencyKey: result.payment.id });
++  });
++
++  it('creates subscription Checkout for the GitOps retainer', async () => {
++    mockCreateSession.mockResolvedValueOnce({
++      id: 'cs_live_retainer',
++      url: 'https://checkout.stripe.com/c/pay/cs_live_retainer',
++    });
++
++    await createLaneCheckout({
++      title: 'GitOps retainer',
++      body: 'Please start a monthly GitOps retainer and agentops coverage.',
++      customer_email: 'ops@example.com',
++      service: 'gitops-retainer',
++      lane: 'gitops-retainer',
++    });
++
++    const [params] = mockCreateSession.mock.calls[0] as [Record<string, unknown>];
++    expect(params.mode).toBe('subscription');
++    expect(params).not.toHaveProperty('payment_method_types');
++    expect(params.integration_identifier).toEqual(expect.stringMatching(/^openclaw-[a-z]{8}$/));
++    const lineItems = params.line_items as Array<{ price_data?: { recurring?: { interval: string }; unit_amount?: number } }>;
++    expect(lineItems[0]?.price_data?.recurring).toEqual({ interval: 'month' });
++    expect(lineItems[0]?.price_data?.unit_amount).toBe(800000);
++    expect((params.subscription_data as { metadata?: { billing?: string } }).metadata?.billing).toBe('subscription');
++  });
++
++  it('uses the Dashboard retainer Price id when STRIPE_PRICE_RETAINER is set', async () => {
++    process.env.STRIPE_PRICE_RETAINER = 'price_retainer_live';
++    mockCreateSession.mockResolvedValueOnce({
++      id: 'cs_live_price',
++      url: 'https://checkout.stripe.com/c/pay/cs_live_price',
++    });
++
++    await createLaneCheckout({
++      body: 'Monthly GitOps retainer for the control plane.',
++      customer_email: 'ops@example.com',
++      service: 'gitops-retainer',
++      lane: 'gitops-retainer',
++    });
++
++    const [params] = mockCreateSession.mock.calls[0] as [Record<string, unknown>];
++    expect(params.line_items).toEqual([{ price: 'price_retainer_live', quantity: 1 }]);
++  });
++
++  it('enables automatic_tax only when a Collecting registration is confirmed', async () => {
++    process.env.STRIPE_TAX_REGISTRATION_ACTIVE = 'true';
++    mockCreateSession.mockResolvedValueOnce({
++      id: 'cs_live_tax',
++      url: 'https://checkout.stripe.com/c/pay/cs_live_tax',
++    });
++
++    await createLaneCheckout({
++      body: 'Please review my GitHub portfolio repository and README.',
++      customer_email: 'buyer@example.com',
++    });
++
++    const [params] = mockCreateSession.mock.calls[0] as [Record<string, unknown>];
++    expect(params.automatic_tax).toEqual({ enabled: true });
++  });
++
++  it('creates a Customer Portal session', async () => {
++    mockCreatePortal.mockResolvedValueOnce({
++      url: 'https://billing.stripe.com/p/session/live_portal',
++    });
++
++    const result = await createBillingPortalSession({ customer_id: 'cus_live_1' });
++    expect(result.simulated).toBe(false);
++    expect(result.url).toContain('billing.stripe.com');
++    expect(mockCreatePortal).toHaveBeenCalledWith({
++      customer: 'cus_live_1',
++      return_url: expect.stringContaining('/revenue/earnings'),
++    });
++  });
++});
+diff --git a/tests/unit/stripe.keys.test.ts b/tests/unit/stripe.keys.test.ts
+new file mode 100644
+index 0000000..925fdc8
+--- /dev/null
++++ b/tests/unit/stripe.keys.test.ts
+@@ -0,0 +1,59 @@
++describe('RAK-first Stripe key resolution', () => {
++  const originalEnv = { ...process.env };
++
++  afterEach(() => {
++    process.env = { ...originalEnv };
++    jest.resetModules();
++  });
++
++  it('prefers STRIPE_RESTRICTED_KEY over STRIPE_SECRET_KEY', () => {
++    process.env.NODE_ENV = 'test';
++    process.env.STRIPE_RESTRICTED_KEY = 'rk_test_preferred_key';
++    process.env.STRIPE_SECRET_KEY = 'sk_test_fallback_key';
++
++    jest.isolateModules(() => {
++      // eslint-disable-next-line @typescript-eslint/no-require-imports
++      const { resolveStripeKey } = require('../../src/billing/stripeClient') as typeof import('../../src/billing/stripeClient');
++      expect(resolveStripeKey()).toBe('rk_test_preferred_key');
++    });
++  });
++
++  it('falls back to STRIPE_SECRET_KEY when no RAK is set', () => {
++    process.env.NODE_ENV = 'test';
++    delete process.env.STRIPE_RESTRICTED_KEY;
++    process.env.STRIPE_SECRET_KEY = 'sk_test_fallback_key';
++
++    jest.isolateModules(() => {
++      // eslint-disable-next-line @typescript-eslint/no-require-imports
++      const { resolveStripeKey } = require('../../src/billing/stripeClient') as typeof import('../../src/billing/stripeClient');
++      expect(resolveStripeKey()).toBe('sk_test_fallback_key');
++    });
++  });
++
++  it('requires rk_live_ in production unless emergency secret-key cutover is set', () => {
++    process.env.NODE_ENV = 'production';
++    delete process.env.STRIPE_ALLOW_SECRET_KEY;
++    process.env.STRIPE_RESTRICTED_KEY = 'sk_live_not_a_restricted_key';
++
++    expect(() => {
++      jest.isolateModules(() => {
++        // eslint-disable-next-line @typescript-eslint/no-require-imports
++        require('../../src/billing/stripeClient');
++      });
++    }).toThrow(/rk_live_/);
++  });
++
++  it('allows sk_live_ in production only with STRIPE_ALLOW_SECRET_KEY=true', () => {
++    process.env.NODE_ENV = 'production';
++    process.env.STRIPE_ALLOW_SECRET_KEY = 'true';
++    delete process.env.STRIPE_RESTRICTED_KEY;
++    process.env.STRIPE_SECRET_KEY = 'sk_live_emergency_cutover_key';
++
++    jest.isolateModules(() => {
++      // eslint-disable-next-line @typescript-eslint/no-require-imports
++      const { resolveStripeKey, STRIPE_API_VERSION } = require('../../src/billing/stripeClient') as typeof import('../../src/billing/stripeClient');
++      expect(resolveStripeKey()).toBe('sk_live_emergency_cutover_key');
++      expect(STRIPE_API_VERSION).toBe('2026-09-30.endive');
++    });
++  });
++});
+diff --git a/tests/unit/stripe.webhook.test.ts b/tests/unit/stripe.webhook.test.ts
+index 8f13fe5..09cff5e 100644
+--- a/tests/unit/stripe.webhook.test.ts
++++ b/tests/unit/stripe.webhook.test.ts
+@@ -17,6 +17,7 @@ import {
+   STRIPE_TEST_WEBHOOK_SECRET,
+   mockResponse,
+ } from '../helpers/fixtures';
++import { createPayment, getPayment, resetLedger } from '../../src/billing/ledger';
+ 
+ // ---------------------------------------------------------------------------
+ // Mock the Stripe SDK before importing the module under test
+@@ -149,6 +150,55 @@ describe('stripeWebhookHandler — supported event routing', () => {
+         payment_status: 'paid',
+       },
+     ],
++    [
++      'checkout.session.async_payment_succeeded',
++      {
++        id: 'cs_test_async_ok',
++        customer: 'cus_test_01',
++        payment_status: 'paid',
++      },
++    ],
++    [
++      'checkout.session.async_payment_failed',
++      {
++        id: 'cs_test_async_fail',
++        customer: 'cus_test_01',
++        payment_status: 'unpaid',
++      },
++    ],
++    [
++      'invoice.paid',
++      {
++        id: 'in_paid_01',
++        customer: 'cus_test_01',
++        amount_paid: 800000,
++        currency: 'usd',
++      },
++    ],
++    [
++      'charge.dispute.created',
++      {
++        id: 'dp_test_01',
++        payment_intent: 'pi_test_01',
++        metadata: {},
++      },
++    ],
++    [
++      'charge.refunded',
++      {
++        id: 'ch_test_01',
++        payment_intent: 'pi_test_01',
++        metadata: {},
++      },
++    ],
++    [
++      'radar.early_fraud_warning.created',
++      {
++        id: 'issfr_test_01',
++        payment_intent: 'pi_test_01',
++        fraud_type: 'made_with_stolen_card',
++      },
++    ],
+   ];
+ 
+   it.each(supportedEvents)(
+@@ -255,3 +305,109 @@ describe('stripeWebhookHandler — constructEvent arguments', () => {
+     consoleSpy.mockRestore();
+   });
+ });
++
++describe('stripeWebhookHandler — checkout fulfillment', () => {
++  const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
++
++  beforeEach(() => {
++    resetLedger();
++  });
++
++  afterAll(() => consoleSpy.mockRestore());
++
++  it('leaves unpaid checkout.session.completed pending', () => {
++    const payment = createPayment({
++      lane: 'small-request',
++      service: 'repo-triage',
++      amount_cents: 1900,
++      currency: 'usd',
++      simulated: false,
++      stripe_session_id: 'cs_unpaid_01',
++      metadata: { billing: 'payment' },
++    });
++
++    mockConstructEvent.mockReturnValueOnce({
++      id: 'evt_unpaid',
++      type: 'checkout.session.completed',
++      data: {
++        object: {
++          id: 'cs_unpaid_01',
++          customer: 'cus_test_01',
++          payment_status: 'unpaid',
++          metadata: { payment_id: payment.id },
++          client_reference_id: payment.id,
++        },
++      },
++    });
++
++    const captured = mockResponse();
++    stripeWebhookHandler(makeStripeReq('checkout.session.completed'), captured.res as Response);
++
++    expect(captured.statusCode).toBe(200);
++    expect(getPayment(payment.id)?.status).toBe('pending');
++  });
++
++  it('marks async_payment_succeeded as paid', () => {
++    const payment = createPayment({
++      lane: 'small-request',
++      service: 'repo-triage',
++      amount_cents: 1900,
++      currency: 'usd',
++      simulated: false,
++      stripe_session_id: 'cs_async_ok',
++      metadata: { billing: 'payment' },
++    });
++
++    mockConstructEvent.mockReturnValueOnce({
++      id: 'evt_async_ok',
++      type: 'checkout.session.async_payment_succeeded',
++      data: {
++        object: {
++          id: 'cs_async_ok',
++          customer: 'cus_test_01',
++          payment_status: 'paid',
++          amount_total: 1900,
++          currency: 'usd',
++          metadata: { payment_id: payment.id },
++          payment_intent: 'pi_async_ok',
++        },
++      },
++    });
++
++    const captured = mockResponse();
++    stripeWebhookHandler(makeStripeReq('checkout.session.async_payment_succeeded'), captured.res as Response);
++
++    expect(getPayment(payment.id)?.status).toBe('paid');
++    expect(getPayment(payment.id)?.stripe_payment_intent_id).toBe('pi_async_ok');
++  });
++
++  it('marks async_payment_failed as failed', () => {
++    const payment = createPayment({
++      lane: 'small-request',
++      service: 'repo-triage',
++      amount_cents: 1900,
++      currency: 'usd',
++      simulated: false,
++      stripe_session_id: 'cs_async_fail',
++      metadata: { billing: 'payment' },
++    });
++
++    mockConstructEvent.mockReturnValueOnce({
++      id: 'evt_async_fail',
++      type: 'checkout.session.async_payment_failed',
++      data: {
++        object: {
++          id: 'cs_async_fail',
++          customer: 'cus_test_01',
++          payment_status: 'unpaid',
++          metadata: { payment_id: payment.id },
++        },
++      },
++    });
++
++    const captured = mockResponse();
++    stripeWebhookHandler(makeStripeReq('checkout.session.async_payment_failed'), captured.res as Response);
++
++    expect(getPayment(payment.id)?.status).toBe('failed');
++  });
++});
+diff --git a/tests/unit/webhook.fallbacks.test.ts b/tests/unit/webhook.fallbacks.test.ts
+index d94d9fb..ac8bb36 100644
+--- a/tests/unit/webhook.fallbacks.test.ts
++++ b/tests/unit/webhook.fallbacks.test.ts
+@@ -34,14 +34,26 @@ describe('requireEnv guards at module load', () => {
+     jest.resetModules();
+   });
+ 
+-  it('stripe.webhook throws if STRIPE_SECRET_KEY is missing', () => {
++  it('stripe.webhook throws if both Stripe keys are missing', () => {
+     delete process.env.STRIPE_SECRET_KEY;
++    delete process.env.STRIPE_RESTRICTED_KEY;
+     expect(() => {
+       jest.isolateModules(() => {
+         // eslint-disable-next-line @typescript-eslint/no-var-requires
+         require('../../src/webhooks/stripe.webhook');
+       });
+-    }).toThrow(/STRIPE_SECRET_KEY/);
++    }).toThrow(/STRIPE_RESTRICTED_KEY|STRIPE_SECRET_KEY/);
++  });
++
++  it('stripe.webhook loads when only STRIPE_RESTRICTED_KEY is set', () => {
++    delete process.env.STRIPE_SECRET_KEY;
++    process.env.STRIPE_RESTRICTED_KEY = 'rk_test_fallbacks_only';
++    expect(() => {
++      jest.isolateModules(() => {
++        // eslint-disable-next-line @typescript-eslint/no-var-requires
++        require('../../src/webhooks/stripe.webhook');
++      });
++    }).not.toThrow();
+   });
+ 
+   it('stripe.webhook throws if STRIPE_WEBHOOK_SECRET is missing', () => {
+-- 
+2.43.0
+

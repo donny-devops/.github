@@ -61,10 +61,13 @@ If you charge US or EU customers, plan Stripe Tax alongside Billing. See [Collec
 
 ## Apply the same rules in `openclaw-revenue-engine`
 
-That service already verifies webhook signatures and creates Checkout Sessions. Remaining gaps versus current Stripe guidance:
+The implementation is ready as `patches/openclaw-revenue-engine-stripe-checkout-hardening.patch` because this agent still cannot push that repo (403). After write access is granted, apply it on `donny-devops/stripe-checkout-hardening-dc36` (see `patches/README.md`).
 
-- Pin API version `2026-09-30.endive` and `stripe` Node SDK 23
-- Handle `checkout.session.async_payment_succeeded` / `async_payment_failed` and skip unpaid `completed` events
-- Add `integration_identifier`
-- Use `mode: subscription` for retainers; add Customer Portal
-- Default new keys to RAKs; keep CI on a sandbox, not shared test mode
+That patch:
+
+- Pins API version `2026-09-30.endive` and `stripe` Node SDK 23
+- Handles `checkout.session.async_payment_succeeded` / `async_payment_failed` and skips unpaid `completed` events
+- Adds `integration_identifier`
+- Uses `mode: subscription` for the `$8,000/mo` GitOps retainer and Customer Portal
+- Defaults new keys to RAKs; keeps CI on a sandbox, not shared test mode
+- Seals customer emails with AES-256-GCM, emits PipeFish A2A envelopes from an async billing DAG, and records audit/metrics/intrusion signals
