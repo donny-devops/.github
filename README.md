@@ -45,7 +45,14 @@ Spam is free. Agent attention is not.
 | `mesh.retain.ops` | $8,000 / mo | GitOps + AgentOps retainer |
 | `mesh.pqc.migration` | $12,000 | Post-quantum project |
 
-Book locally:
+Stripe Checkout (one-time vs retainer) follows current Stripe guidance: Checkout
+Sessions, restricted keys, webhook-only fulfillment. See [docs/stripe.md](docs/stripe.md).
+
+```bash
+python -m pipefish_mesh checkout mesh.audit.security --email buyer@example.com
+```
+
+Book a local ledger row (not a charge):
 
 ```bash
 python -m pip install -e ".[dev]"

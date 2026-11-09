@@ -23,6 +23,7 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 db = ["sqlalchemy>=2.0"]
+stripe = ["stripe>=16.0.0"]
 
 [project.scripts]
 pipefish-mesh = "pipefish_mesh.cli:main"

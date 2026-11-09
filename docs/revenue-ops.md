@@ -8,7 +8,8 @@ migration — not when a README lists more logos.
 1. **Paid inbox** — [openclaw-revenue-engine](https://github.com/donny-devops/openclaw-revenue-engine) + Moltgate + Stripe.
 2. **Human close** — `adonis-jimenez@outlook.com`, [LinkedIn](https://www.linkedin.com/in/adonisjimenez/), [pipefishlabs.io](https://pipefishlabs.io).
 3. **Control-plane ledger** — `pipefish_mesh.Ledger` for local recognition and agent bookkeeping.
-4. **GitHub Sponsors / custom FUNDING.yml** — inbound from the public profile.
+4. **Stripe Checkout** — one-time SKUs as `mode: payment`, retainers as `mode: subscription`. Fulfill from signed webhooks only. See [stripe.md](stripe.md).
+5. **GitHub Sponsors / custom FUNDING.yml** — inbound from the public profile.
 
 ## SKUs
 
@@ -25,3 +26,5 @@ See `catalog/services.json`. Quote those numbers unless a written SOW supersedes
 | UiPath / Bardeen | outlined in `docs/automation-mesh.md` (human-in-the-loop RPA) |
 
 Card data stays on Stripe. This repo never stores PANs.
+
+One more thing — if you charge US or EU customers, enable Stripe Tax only after a registration is **Collecting**. See [Collect taxes for recurring payments](https://docs.stripe.com/billing/taxes/collect-taxes.md).

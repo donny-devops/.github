@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .commerce import Ledger, load_catalog
 from .mcp_server import main as mcp_main
+from .stripe_checkout import start_checkout
 from .vectors import TokenMemory
 from .workflows import run_revenue_intake
 
@@ -24,6 +25,12 @@ def main() -> None:
     intake.add_argument("request")
     intake.add_argument("--sku", default="mesh.lane.ping")
     intake.add_argument("--ledger", default=":memory:")
+
+    checkout = sub.add_parser("checkout", help="Build a Stripe Checkout Session payload (dry-run)")
+    checkout.add_argument("sku")
+    checkout.add_argument("--email", required=True)
+    checkout.add_argument("--success-url", default="https://pipefishlabs.io/paid/{CHECKOUT_SESSION_ID}")
+    checkout.add_argument("--cancel-url", default="https://pipefishlabs.io/cancel")
 
     args = parser.parse_args()
     if args.command == "catalog":
@@ -43,6 +50,29 @@ def main() -> None:
                     "status": result.status,
                     "outputs": result.outputs,
                     "recognized_cents": ledger.recognized_cents(),
+                },
+                indent=2,
+            )
+        )
+        return
+    if args.command == "checkout":
+        catalog = load_catalog()
+        sku = catalog.get(args.sku)
+        ledger = Ledger()
+        params, entry_id = start_checkout(
+            sku,
+            customer_email=args.email,
+            success_url=args.success_url,
+            cancel_url=args.cancel_url,
+            ledger=ledger,
+        )
+        print(
+            json.dumps(
+                {
+                    "entry_id": entry_id,
+                    "mode": params["mode"],
+                    "fulfillment": "webhook",
+                    "session": params,
                 },
                 indent=2,
             )

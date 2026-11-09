@@ -27,6 +27,11 @@ class Sku:
     def amount_cents(self) -> int:
         return int(round(self.price_usd * 100))
 
+    @property
+    def checkout_mode(self) -> str:
+        """Stripe Checkout mode: retainers subscribe; everything else is one-time."""
+        return "subscription" if self.cadence == "monthly" else "payment"
+
 
 class ServiceCatalog:
     def __init__(self, skus: Iterable[Sku]) -> None:
@@ -117,6 +122,10 @@ class Ledger:
     def entries(self) -> list[dict[str, Any]]:
         rows = self._conn.execute("SELECT * FROM ledger ORDER BY id ASC").fetchall()
         return [dict(row) for row in rows]
+
+    def set_status(self, entry_id: int, status: str) -> None:
+        self._conn.execute("UPDATE ledger SET status = ? WHERE id = ?", (status, entry_id))
+        self._conn.commit()
 
     def recognized_cents(self) -> int:
         row = self._conn.execute(

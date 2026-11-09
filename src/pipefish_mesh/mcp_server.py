@@ -9,6 +9,7 @@ from typing import Any
 
 from .commerce import Ledger, load_catalog
 from .protocol import Envelope, MeshBus
+from .stripe_checkout import start_checkout
 from .vectors import TokenMemory
 from .workflows import run_revenue_intake
 
@@ -63,6 +64,23 @@ TOOLS = [
         },
     },
     {
+        "name": "checkout.build",
+        "description": (
+            "Build a Stripe Checkout Session payload for a catalog SKU. "
+            "Fulfillment is webhook-only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sku_id": {"type": "string"},
+                "customer_email": {"type": "string"},
+                "success_url": {"type": "string"},
+                "cancel_url": {"type": "string"},
+            },
+            "required": ["sku_id", "customer_email"],
+        },
+    },
+    {
         "name": "a2a.send",
         "description": "Publish an agent-to-agent envelope on the in-process bus.",
         "inputSchema": {
@@ -112,6 +130,28 @@ class MeshRuntime:
             }
         if name == "memory.search":
             return self.memory.search(str(arguments["query"]), int(arguments.get("k", 5)))
+        if name == "checkout.build":
+            sku = self.catalog.get(str(arguments["sku_id"]))
+            params, entry_id = start_checkout(
+                sku,
+                customer_email=str(arguments["customer_email"]),
+                success_url=str(
+                    arguments.get("success_url", "https://pipefishlabs.io/paid/{CHECKOUT_SESSION_ID}")
+                ),
+                cancel_url=str(arguments.get("cancel_url", "https://pipefishlabs.io/cancel")),
+                ledger=self.ledger,
+            )
+            return {
+                "entry_id": entry_id,
+                "mode": params["mode"],
+                "fulfillment": "webhook",
+                "session": params,
+                "note": (
+                    "Do not fulfill on the success URL. Handle "
+                    "checkout.session.completed and "
+                    "checkout.session.async_payment_succeeded."
+                ),
+            }
         if name == "a2a.send":
             envelope = Envelope(
                 source=str(arguments["source"]),

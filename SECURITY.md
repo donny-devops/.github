@@ -26,6 +26,10 @@ This control plane resolves secrets through `pipefish_mesh.SecretBroker`
 envelopes are scopes, not credentials. Never commit `.env` files, tunnel
 tokens, Stripe keys, or webhook URLs.
 
+Stripe: use a restricted key (`rk_test_` / `rk_live_`), not a secret key, in
+AWS Secrets Manager. Verify `Stripe-Signature` on every webhook. Never log
+keys. Gitleaks in reusable CI is the last line of defense, not the first.
+
 ## Disclosure expectations
 
 We follow responsible (coordinated) disclosure. Please give us a reasonable
