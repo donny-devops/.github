@@ -27,7 +27,7 @@ It does **not** replace the public products. Those stay in their own repos. This
 | [infra-monitoring-dashboard](https://github.com/donny-devops/infra-monitoring-dashboard) | Grafana / Prometheus / Alertmanager |
 | [docker-hacking-lab](https://github.com/donny-devops/docker-hacking-lab) | Isolated ethical-hacking lab |
 | [qwen-core](https://github.com/donny-devops/qwen-core) | TypeScript focus client |
-| [api-saas-decision-engine](https://github.com/donny-devops/api-saas-decision-engine) | Decision API (bootstrap) |
+| [api-saas-decision-engine](https://github.com/donny-devops/api-saas-decision-engine) | SaaS financial decision API + mesh envelope / SKU pricing |
 
 Canonical machine list: [`catalog/repos.yaml`](catalog/repos.yaml).
 

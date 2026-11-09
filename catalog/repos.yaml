@@ -37,7 +37,7 @@ repos:
     role: TypeScript focus / productivity client
     url: https://github.com/donny-devops/qwen-core
   - name: api-saas-decision-engine
-    role: decision / scoring API (bootstrap in progress)
+    role: SaaS financial decision API + PipeFish mesh envelope / SKU pricing
     url: https://github.com/donny-devops/api-saas-decision-engine
   - name: .github
     role: private control plane, community health, reusable workflows
