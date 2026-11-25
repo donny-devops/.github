@@ -60,12 +60,13 @@ jobs:
           fetch-depth: 0
 
       - name: Run TruffleHog
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@v3.99.8
         with:
           path: ./
           base: ${{ github.event.repository.default_branch }}
           head: HEAD
           extra_args: --only-verified
+          version: v3.99.8
 
   dependency-review:
     name: Dependency Review
