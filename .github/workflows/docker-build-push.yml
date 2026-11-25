@@ -103,13 +103,13 @@ jobs:
 
       - name: Run Trivy vulnerability scan
         if: inputs.enable-trivy && inputs.push
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ inputs.registry }}/${{ inputs.image-name }}:latest
           format: sarif
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Upload Trivy SARIF results
         if: inputs.enable-trivy && inputs.push && always()
